@@ -13,7 +13,8 @@
  *     - build   : read book.yaml, optionally ingest first, normalize chapters
  *                 into workspace/chapters/, create *date-based* outputs,
  *                 CLEAN target (overwrite), write BUILDINFO.txt,
- *                 auto-generate workspace/toc.md and site/index.html
+ *                 auto-generate workspace/toc.md, frontmatter.md,
+ *                 acknowledgements.md, and site/index.html
  *     - serve   : tiny static HTTP server to preview any folder (default: site/)
  *
  * DESIGN NOTES
@@ -26,7 +27,7 @@
 #include <string.h>     /* strcmp, strlen, memcpy, memmove, strchr, strncmp */
 #include <stdlib.h>     /* malloc, free, strtol, qsort, realloc */
 #include <errno.h>      /* errno, EEXIST */
-#include <ctype.h>      /* isalnum, isspace, tolower, toupper */
+#include <ctype.h>      /* isalnum, isspace, tolower, toupper, isdigit */
 #include <time.h>       /* time, gmtime, strftime */
 #include "ueng/version.h"
 
@@ -45,7 +46,10 @@ static int  write_site_index(const char* site_dir,
                              const char* author,
                              const char* slug,
                              const char* stamp);
+
 static int  generate_toc_md(const char* book_title);
+static int  generate_frontmatter_md(const char* title, const char* author);
+static int  generate_acknowledgements_md(const char* author);
 
 /*--- Platform-specific includes for directory & sockets --------------------*/
 #ifdef _WIN32
@@ -213,8 +217,12 @@ static int seed_book_yaml(void) {
     const char *yaml =
         "# Umicom AuthorEngine AI — Book manifest (starter)\n"
         "title: \"My New Book\"\n"
+        "subtitle: \"Learning by Building\"\n"
         "author: \"Your Name\"\n"
         "language: \"en-GB\"\n"
+        "publisher: \"\"\n"
+        "copyright_year: \"2025\"\n"
+        "description: \"Short paragraph describing the book.\"\n"
         "dropzone: \"dropzone\"\n"
         "images_dir: \"dropzone/images\"\n"
         "target_formats: [pdf, docx, epub, html, md]\n"
@@ -263,7 +271,7 @@ static int tiny_yaml_get(const char* filename, const char* key, char* out, size_
     return found ? 0 : 1;
 }
 static int tiny_yaml_get_bool(const char* filename, const char* key, int* out) {
-    char buf[64];
+    char buf[64] = {0};
     int rc = tiny_yaml_get(filename, key, buf, sizeof(buf));
     if (rc != 0) return rc;
     for (char* p = buf; *p; ++p) *p = (char)tolower((unsigned char)*p);
@@ -415,7 +423,7 @@ static int sl_push(StrList *sl, const char* s) {
     return 0;
 }
 
-/* Case-insensitive compare */
+/* Case-insensitive compare + natural sort */
 static int ci_cmp(const char* a, const char* b) {
     for (;;) {
         unsigned char ca = (unsigned char)tolower(*a);
@@ -426,8 +434,6 @@ static int ci_cmp(const char* a, const char* b) {
         a++; b++;
     }
 }
-
-/* Natural number, case-insensitive comparator (ch2 < ch10) */
 static int natural_ci_cmp(const char* a, const char* b) {
     size_t i=0, j=0;
     for (;;) {
@@ -436,24 +442,18 @@ static int natural_ci_cmp(const char* a, const char* b) {
 
         if (ca == '\0' && cb == '\0') return 0;
         if (isdigit(ca) && isdigit(cb)) {
-            /* parse number from a */
             unsigned long long va=0, vb=0;
             size_t ia=i, jb=j;
             while (isdigit((unsigned char)a[ia])) { va = va*10ULL + (unsigned)(a[ia]-'0'); ia++; }
             while (isdigit((unsigned char)b[jb])) { vb = vb*10ULL + (unsigned)(b[jb]-'0'); jb++; }
             if (va < vb) return -1;
             if (va > vb) return  1;
-            /* numbers equal -> advance past numeric runs */
-            i = ia; j = jb;
-            continue;
+            i = ia; j = jb; continue;
         }
-
-        /* case-insensitive char compare */
         unsigned char ta = (unsigned char)tolower(ca);
         unsigned char tb = (unsigned char)tolower(cb);
         if (ta < tb) return -1;
         if (ta > tb) return  1;
-
         if (ca != '\0') i++;
         if (cb != '\0') j++;
     }
@@ -580,7 +580,7 @@ static int ingest_walk(const char* abs_dir, const char* rel_dir, StrList* out) {
 #endif
 
 /*-----------------------------------------------------------------------------
- * write_outline_md — used by cmd_ingest
+ * write_outline_md — used by cmd_ingest (ASCII dash for console-friendliness)
  *---------------------------------------------------------------------------*/
 static int write_outline_md(const char* title, const char* author,
                             const char* dropzone_rel, const StrList* files) {
@@ -595,7 +595,7 @@ static int write_outline_md(const char* title, const char* author,
     char day[32]; build_date_utc(day, sizeof(day));
 
     int n = snprintf(buf, est,
-        "# Draft Outline — %s\n\n"
+        "# Draft Outline - %s\n\n"
         "_Author:_ **%s**  \n"
         "_Date:_ **%s**  \n"
         "_Sources scanned:_ `%s`\n\n"
@@ -696,6 +696,28 @@ static int copy_file_binary(const char* src, const char* dst) {
     fclose(out);
     return 0;
 }
+
+/* Strip a leading top-level "chapters/" segment if present (to avoid
+   workspace/chapters/chapters/... when users drop a "chapters" folder). */
+static const char* strip_leading_chapters(const char* rel) {
+    /* Find first segment length */
+    size_t i = 0;
+    while (rel[i] && rel[i] != '/' && rel[i] != '\\') i++;
+    if (i == 8 &&
+        (rel[0]=='c'||rel[0]=='C') &&
+        (rel[1]=='h'||rel[1]=='H') &&
+        (rel[2]=='a'||rel[2]=='A') &&
+        (rel[3]=='p'||rel[3]=='P') &&
+        (rel[4]=='t'||rel[4]=='T') &&
+        (rel[5]=='e'||rel[5]=='E') &&
+        (rel[6]=='r'||rel[6]=='R') &&
+        (rel[7]=='s'||rel[7]=='S')) {
+        if (rel[i] == '/' || rel[i] == '\\') return rel + i + 1; /* skip "chapters/" */
+        return rel + i; /* just "chapters" */
+    }
+    return rel;
+}
+
 static int normalize_chapters(const char* dropzone) {
     StrList files; sl_init(&files);
     char abs[1024]; snprintf(abs, sizeof(abs), "%s", dropzone);
@@ -719,11 +741,15 @@ static int normalize_chapters(const char* dropzone) {
         char rel_native[1024]; snprintf(rel_native, sizeof(rel_native), "%s", rel);
         rel_to_native_sep(rel_native);
 
+        /* Drop top-level "chapters/" if present */
+        const char* relp = strip_leading_chapters(rel_native);
+        if (*relp == '\0') { skipped++; continue; }
+
         char src[1200];
         snprintf(src, sizeof(src), "%s%c%s", dropzone, PATH_SEP, rel_native);
 
         char dst[1200];
-        snprintf(dst, sizeof(dst), "workspace%cchapters%c%s", PATH_SEP, PATH_SEP, rel_native);
+        snprintf(dst, sizeof(dst), "workspace%cchapters%c%s", PATH_SEP, PATH_SEP, relp);
 
         if (copy_file_binary(src, dst) == 0) copied++;
         else fprintf(stderr,"[normalize] copy failed: %s -> %s\n", src, dst);
@@ -741,9 +767,6 @@ static int normalize_chapters(const char* dropzone) {
 }
 
 /*============================ TOC generation =================================*/
-
-/* Turn filename into a friendlier label: drop extension, replace _/- with space,
-   collapse spaces, Title Case. Also map leading "chNN" to "Chapter NN — ..." */
 static void titlecase_inplace(char* s) {
     int new_word = 1;
     for (size_t i=0; s[i]; ++i) {
@@ -754,12 +777,10 @@ static void titlecase_inplace(char* s) {
         } else if (isdigit(c)) {
             new_word = 0;
         } else {
-            /* any non-alnum -> space */
             s[i] = ' ';
             new_word = 1;
         }
     }
-    /* collapse multiple spaces in-place */
     size_t w=0;
     for (size_t r=0; s[r]; ++r) {
         if (s[r] == ' ' && (w==0 || s[w-1]==' ')) continue;
@@ -768,63 +789,50 @@ static void titlecase_inplace(char* s) {
     if (w>0 && s[w-1]==' ') w--;
     s[w]='\0';
 }
-
 static void make_label_from_filename(const char* filename, char* out, size_t outsz) {
-    /* get base name (after last '/') */
     const char* base = filename;
     const char* slash = strrchr(filename, '/');
     if (slash) base = slash + 1;
-
-    /* copy and strip extension */
     size_t n = strlen(base);
     if (n >= outsz) n = outsz - 1;
-    memcpy(out, base, n);
-    out[n] = '\0';
-    char* dot = strrchr(out, '.');
-    if (dot) *dot = '\0';
-
+    memcpy(out, base, n); out[n] = '\0';
+    char* dot = strrchr(out, '.'); if (dot) *dot = '\0';
     titlecase_inplace(out);
-
-    /* Special: "ChNN ..." => "Chapter NN — ..." */
-    if ((out[0]=='C' || out[0]=='c') && (out[1]=='h' || out[1]=='H')) {
+    if ((out[0]=='C'||out[0]=='c') && (out[1]=='H'||out[1]=='h')) {
         size_t i=2; while (out[i]==' ') i++;
         size_t j=i; unsigned num=0; int had_digit=0;
         while (isdigit((unsigned char)out[j])) { had_digit=1; num = num*10u + (unsigned)(out[j]-'0'); j++; }
         if (had_digit) {
-            /* Build "Chapter <num> — <rest>" */
             char rest[256]; size_t k=0;
             while (out[j]==' ') j++;
             for (; out[j] && k+1<sizeof(rest); ++j) rest[k++] = out[j];
             rest[k]='\0';
-
             char tmp[512];
-            if (rest[0]) snprintf(tmp, sizeof(tmp), "Chapter %u — %s", num, rest);
+            if (rest[0]) snprintf(tmp, sizeof(tmp), "Chapter %u - %s", num, rest);
             else         snprintf(tmp, sizeof(tmp), "Chapter %u", num);
             snprintf(out, outsz, "%s", tmp);
         }
     }
 }
-
-/* Create workspace/toc.md by scanning workspace/chapters (skip PDFs) */
 static int generate_toc_md(const char* book_title) {
     const char* root = "workspace/chapters";
-    if (!helper_exists_file(root)) {
-        /* nothing to do (no chapters yet) */
-        return 0;
-    }
+    if (!helper_exists_file(root)) return 0;
 
     StrList files; sl_init(&files);
     int rc = ingest_walk(root, NULL, &files);
     if (rc != 0) { sl_free(&files); return 1; }
 
-    /* keep only .md/.markdown/.txt for TOC */
-    /* also prefix 'chapters/' to create link targets */
     StrList kept; sl_init(&kept);
     for (size_t i=0; i<files.count; ++i) {
         const char* rel = files.items[i];
+
+        /* Skip PDFs and underscore-leading files (e.g. _manifest.txt) */
+        const char* base = rel;
+        const char* slash = strrchr(rel, '/');
+        if (slash) base = slash + 1;
+        if (base[0] == '_') continue;
         if (endswith_ic(rel,".pdf")) continue;
 
-        /* normalize already '/', just ensure we're "chapters/rel" */
         int need = snprintf(NULL, 0, "chapters/%s", rel);
         if (need < 0) { sl_free(&files); sl_free(&kept); return 1; }
         char* path = (char*)malloc((size_t)need + 1);
@@ -835,20 +843,17 @@ static int generate_toc_md(const char* book_title) {
     }
     sl_free(&files);
 
-    if (kept.count > 1) {
-        qsort(kept.items, kept.count, sizeof(char*), qsort_nat_ci_cmp);
-    }
+    if (kept.count > 1) qsort(kept.items, kept.count, sizeof(char*), qsort_nat_ci_cmp);
 
     (void)mkpath("workspace");
     const char* outpath = "workspace/toc.md";
 
-    /* Estimate size and build content */
     size_t est = 1024 + kept.count * 160;
     char* buf = (char*)malloc(est);
     if (!buf) { sl_free(&kept); return 1; }
 
     int n = snprintf(buf, est,
-        "# Table of Contents — %s\n\n"
+        "# Table of Contents - %s\n\n"
         "> Draft TOC generated from `workspace/chapters/`.\n\n",
         (book_title && *book_title) ? book_title : "Untitled");
     if (n < 0) { free(buf); sl_free(&kept); return 1; }
@@ -861,14 +866,10 @@ static int generate_toc_md(const char* book_title) {
     } else {
         for (size_t i=0; i<kept.count; ++i) {
             const char* link = kept.items[i];
-            /* label from filename */
-            char label[256];
-            make_label_from_filename(link, label, sizeof(label));
-
+            char label[256]; make_label_from_filename(link, label, sizeof(label));
             n = snprintf(buf + used, est - used, "- [%s](<%s>)\n", label, link);
             if (n < 0) { free(buf); sl_free(&kept); return 1; }
             used += (size_t)n;
-
             if (used + 256 > est) {
                 est *= 2;
                 char* tmp = (char*)realloc(buf, est);
@@ -881,10 +882,79 @@ static int generate_toc_md(const char* book_title) {
     int wr = write_file(outpath, buf);
     free(buf);
     sl_free(&kept);
-
     if (wr == 0) printf("[toc] wrote: %s\n", outpath);
     else         fprintf(stderr, "[toc] ERROR: failed to write %s\n", outpath);
+    return wr == 0 ? 0 : 1;
+}
 
+/*===================== Frontmatter & Acknowledgements =======================*/
+static int generate_frontmatter_md(const char* title, const char* author) {
+    (void)mkpath("workspace");
+
+    char subtitle[256]={0}, language[64]={0}, description[640]={0}, publisher[128]={0}, year[16]={0};
+    (void)tiny_yaml_get("book.yaml","subtitle",        subtitle,   sizeof(subtitle));
+    (void)tiny_yaml_get("book.yaml","language",        language,   sizeof(language));
+    (void)tiny_yaml_get("book.yaml","description",     description,sizeof(description));
+    (void)tiny_yaml_get("book.yaml","publisher",       publisher,  sizeof(publisher));
+    (void)tiny_yaml_get("book.yaml","copyright_year",  year,       sizeof(year));
+
+    char day[32]; build_date_utc(day, sizeof(day));
+
+    const char* outpath = "workspace/frontmatter.md";
+    size_t est = 2048 + strlen(title) + strlen(author) + strlen(subtitle) + strlen(description) + strlen(publisher);
+    char* buf = (char*)malloc(est);
+    if (!buf) return 1;
+
+    int n = snprintf(buf, est,
+        "# %s\n"
+        "%s%s%s"
+        "\n"
+        "**Author:** %s  \n"
+        "%s**Language:** %s  \n"
+        "**Date:** %s  \n"
+        "%s**Copyright:** © %s %s\n"
+        "\n"
+        "%s",
+        (title && *title)? title : "Untitled",
+        (subtitle[0] != '\0') ? "## " : "",
+        (subtitle[0] != '\0') ? subtitle : "",
+        (subtitle[0] != '\0') ? "\n" : "",
+        (author && *author)? author : "Unknown",
+        (publisher[0] != '\0') ? "**Publisher:** " : "",
+        (language[0]  != '\0') ? language : "en",
+        day,
+        (publisher[0] != '\0') ? "" : "",
+        (year[0]      != '\0') ? year : "2025",
+        (author && *author)? author : "Unknown",
+        (description[0] != '\0') ? description : "_No description provided._\n"
+    );
+    if (n < 0) { free(buf); return 1; }
+
+    int wr = write_file(outpath, buf);
+    free(buf);
+    if (wr == 0) printf("[frontmatter] wrote: %s\n", outpath);
+    else         fprintf(stderr, "[frontmatter] ERROR: failed to write %s\n", outpath);
+    return wr == 0 ? 0 : 1;
+}
+
+static int generate_acknowledgements_md(const char* author) {
+    (void)mkpath("workspace");
+    const char* outpath = "workspace/acknowledgements.md";
+
+    const char* tpl =
+"# Acknowledgements\n\n"
+"This work was made possible thanks to the encouragement and contributions of friends,\n"
+"family, colleagues, and the broader open source community.\n\n"
+"- To my family for patience and support during the writing process.\n"
+"- To early readers and reviewers for their thoughtful feedback.\n"
+"- To open-source maintainers whose tools power modern learning.\n\n"
+"*Optional:* This book was scaffolded with **Umicom AuthorEngine AI**, an open project by the\n"
+"**Umicom Foundation**. You may keep or remove this line.\n";
+
+    int wr = write_file(outpath, tpl);
+    if (wr == 0) printf("[ack] wrote: %s\n", outpath);
+    else         fprintf(stderr, "[ack] ERROR: failed to write %s\n", outpath);
+    (void)author; /* reserved for future personalized thanks */
     return wr == 0 ? 0 : 1;
 }
 
@@ -976,8 +1046,10 @@ static int cmd_build(void) {
         }
     }
 
-    /* 4) Generate a draft workspace/toc.md from normalized chapters */
+    /* 4) Generate scaffold docs in workspace/ */
     (void)generate_toc_md(title);
+    (void)generate_frontmatter_md(title, author);
+    (void)generate_acknowledgements_md(author);
 
     /* 5) Compute slug/date/stamp and prepare outputs/<slug>/<YYYY-MM-DD> */
     char slug[256]; slugify(title, slug, sizeof(slug));
