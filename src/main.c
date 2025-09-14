@@ -13,7 +13,7 @@
  *     - build   : read book.yaml, optionally ingest first, normalize chapters
  *                 into workspace/chapters/, create *date-based* outputs,
  *                 CLEAN target (overwrite), write BUILDINFO.txt,
- *                 auto-generate site/index.html
+ *                 auto-generate workspace/toc.md and site/index.html
  *     - serve   : tiny static HTTP server to preview any folder (default: site/)
  *
  * DESIGN NOTES
@@ -26,11 +26,11 @@
 #include <string.h>     /* strcmp, strlen, memcpy, memmove, strchr, strncmp */
 #include <stdlib.h>     /* malloc, free, strtol, qsort, realloc */
 #include <errno.h>      /* errno, EEXIST */
-#include <ctype.h>      /* isalnum, isspace, tolower */
+#include <ctype.h>      /* isalnum, isspace, tolower, toupper */
 #include <time.h>       /* time, gmtime, strftime */
 #include "ueng/version.h"
 
-/*---- Forward declarations for commands & helpers (C99 requires this) ----*/
+/*---- Forward declarations for commands & helpers --------------------------*/
 static int  cmd_init(void);
 static int  cmd_ingest(void);
 static int  cmd_build(void);
@@ -45,6 +45,7 @@ static int  write_site_index(const char* site_dir,
                              const char* author,
                              const char* slug,
                              const char* stamp);
+static int  generate_toc_md(const char* book_title);
 
 /*--- Platform-specific includes for directory & sockets --------------------*/
 #ifdef _WIN32
@@ -79,7 +80,6 @@ static int  write_site_index(const char* site_dir,
   #define closesock close
 #endif
 
-/*--- Small compatibility for F_OK on POSIX (define it BEFORE use) ----------*/
 #ifndef _WIN32
   #ifndef FOK
     #define FOK F_OK
@@ -191,7 +191,7 @@ static int write_file(const char *path, const char *content) {
 }
 
 /*-----------------------------------------------------------------------------
- * write_gitkeep — "<dir>/.gitkeep" via snprintf join
+ * write_gitkeep — "<dir>/.gitkeep"
  *---------------------------------------------------------------------------*/
 static int write_gitkeep(const char *dir) {
     const char *leaf = ".gitkeep";
@@ -230,8 +230,7 @@ static int seed_book_yaml(void) {
 }
 
 /*-----------------------------------------------------------------------------
- * tiny_yaml_get — extract scalar "key: value" from book.yaml (simple)
- *   Returns: 0 = found, 1 = not found, -1 = file error.
+ * tiny_yaml_get / tiny_yaml_get_bool
  *---------------------------------------------------------------------------*/
 static int tiny_yaml_get(const char* filename, const char* key, char* out, size_t outsz) {
     FILE* f = ueng_fopen(filename, "rb");
@@ -263,11 +262,6 @@ static int tiny_yaml_get(const char* filename, const char* key, char* out, size_
     fclose(f);
     return found ? 0 : 1;
 }
-
-/*-----------------------------------------------------------------------------
- * tiny_yaml_get_bool — reads key as true/false/yes/no/on/off/1/0 (case-insens.)
- *   Returns: 0 = parsed, 1 = not found, -1 = file error.
- *---------------------------------------------------------------------------*/
 static int tiny_yaml_get_bool(const char* filename, const char* key, int* out) {
     char buf[64];
     int rc = tiny_yaml_get(filename, key, buf, sizeof(buf));
@@ -295,8 +289,7 @@ static void slugify(const char* title, char* out, size_t outsz) {
 }
 
 /*-----------------------------------------------------------------------------
- * build_date_utc — "YYYY-MM-DD"
- * build_timestamp_utc — "YYYY-MM-DDTHH-MM-SSZ" (kept for BUILDINFO)
+ * build_date_utc / build_timestamp_utc
  *---------------------------------------------------------------------------*/
 static void build_date_utc(char* out, size_t outsz) {
     time_t now = time(NULL);
@@ -393,9 +386,7 @@ static int clean_dir(const char* dir) {
 }
 #endif
 
-/*========================= INGESTOR (lists sources) =========================*/
-
-/* Dynamic string list to collect discovered files (relative paths) */
+/*========================= String list + helpers ============================*/
 typedef struct {
     char **items;
     size_t count;
@@ -424,7 +415,7 @@ static int sl_push(StrList *sl, const char* s) {
     return 0;
 }
 
-/* Case-insensitive string compare for qsort (portable) */
+/* Case-insensitive compare */
 static int ci_cmp(const char* a, const char* b) {
     for (;;) {
         unsigned char ca = (unsigned char)tolower(*a);
@@ -435,10 +426,42 @@ static int ci_cmp(const char* a, const char* b) {
         a++; b++;
     }
 }
-static int qsort_ci_cmp(const void* A, const void* B) {
+
+/* Natural number, case-insensitive comparator (ch2 < ch10) */
+static int natural_ci_cmp(const char* a, const char* b) {
+    size_t i=0, j=0;
+    for (;;) {
+        unsigned char ca = (unsigned char)a[i];
+        unsigned char cb = (unsigned char)b[j];
+
+        if (ca == '\0' && cb == '\0') return 0;
+        if (isdigit(ca) && isdigit(cb)) {
+            /* parse number from a */
+            unsigned long long va=0, vb=0;
+            size_t ia=i, jb=j;
+            while (isdigit((unsigned char)a[ia])) { va = va*10ULL + (unsigned)(a[ia]-'0'); ia++; }
+            while (isdigit((unsigned char)b[jb])) { vb = vb*10ULL + (unsigned)(b[jb]-'0'); jb++; }
+            if (va < vb) return -1;
+            if (va > vb) return  1;
+            /* numbers equal -> advance past numeric runs */
+            i = ia; j = jb;
+            continue;
+        }
+
+        /* case-insensitive char compare */
+        unsigned char ta = (unsigned char)tolower(ca);
+        unsigned char tb = (unsigned char)tolower(cb);
+        if (ta < tb) return -1;
+        if (ta > tb) return  1;
+
+        if (ca != '\0') i++;
+        if (cb != '\0') j++;
+    }
+}
+static int qsort_nat_ci_cmp(const void* A, const void* B) {
     const char* a = *(const char* const*)A;
     const char* b = *(const char* const*)B;
-    return ci_cmp(a,b);
+    return natural_ci_cmp(a,b);
 }
 
 static int endswith_ic(const char* s, const char* suffix) {
@@ -447,7 +470,7 @@ static int endswith_ic(const char* s, const char* suffix) {
     return ci_cmp(s + (ns - nx), suffix) == 0;
 }
 
-/* Normalize a relative path to use '/' (nice in Markdown across OS) */
+/* Normalize rel path to use '/' for Markdown portability */
 static void rel_normalize(char* s) {
 #ifdef _WIN32
     for (char* p = s; *p; ++p) if (*p == '\\') *p = '/';
@@ -463,7 +486,7 @@ static void rel_to_native_sep(char* s) {
 #endif
 }
 
-/* Recursive directory walk: collect desired files */
+/* Recursive directory walk — used by ingest & normalization */
 #ifdef _WIN32
 static int ingest_walk(const char* abs_dir, const char* rel_dir, StrList* out) {
     int patn = snprintf(NULL, 0, "%s\\*", abs_dir);
@@ -556,7 +579,9 @@ static int ingest_walk(const char* abs_dir, const char* rel_dir, StrList* out) {
 }
 #endif
 
-/* Write workspace/outline.md */
+/*-----------------------------------------------------------------------------
+ * write_outline_md — used by cmd_ingest
+ *---------------------------------------------------------------------------*/
 static int write_outline_md(const char* title, const char* author,
                             const char* dropzone_rel, const StrList* files) {
     (void)mkpath("workspace");
@@ -609,7 +634,9 @@ static int write_outline_md(const char* title, const char* author,
     return rc;
 }
 
-/* The `ingest` command */
+/*-----------------------------------------------------------------------------
+ * cmd_ingest — outline scan of dropzone
+ *---------------------------------------------------------------------------*/
 static int cmd_ingest(void) {
     char title[256]={0}, author[256]={0}, drop[256]={0};
     if (tiny_yaml_get("book.yaml","title", title,sizeof(title))  != 0) snprintf(title, sizeof(title),  "%s","Untitled");
@@ -625,7 +652,7 @@ static int cmd_ingest(void) {
     if (rc != 0) { fprintf(stderr, "[ingest] ERROR: directory walk failed\n"); sl_free(&files); return 1; }
 
     if (files.count > 1) {
-        qsort(files.items, files.count, sizeof(char*), qsort_ci_cmp);
+        qsort(files.items, files.count, sizeof(char*), qsort_nat_ci_cmp);
     }
 
     rc = write_outline_md(title, author, drop, &files);
@@ -637,7 +664,6 @@ static int cmd_ingest(void) {
 }
 
 /*======================== Chapter normalization (build) =====================*/
-
 static int ensure_parent_dir(const char* filepath) {
     const char* last_sep = NULL;
     for (const char* p = filepath; *p; ++p) {
@@ -712,6 +738,154 @@ static int normalize_chapters(const char* dropzone) {
 
     sl_free(&files);
     return 0;
+}
+
+/*============================ TOC generation =================================*/
+
+/* Turn filename into a friendlier label: drop extension, replace _/- with space,
+   collapse spaces, Title Case. Also map leading "chNN" to "Chapter NN — ..." */
+static void titlecase_inplace(char* s) {
+    int new_word = 1;
+    for (size_t i=0; s[i]; ++i) {
+        unsigned char c = (unsigned char)s[i];
+        if (isalpha(c)) {
+            s[i] = (char)(new_word ? toupper(c) : tolower(c));
+            new_word = 0;
+        } else if (isdigit(c)) {
+            new_word = 0;
+        } else {
+            /* any non-alnum -> space */
+            s[i] = ' ';
+            new_word = 1;
+        }
+    }
+    /* collapse multiple spaces in-place */
+    size_t w=0;
+    for (size_t r=0; s[r]; ++r) {
+        if (s[r] == ' ' && (w==0 || s[w-1]==' ')) continue;
+        s[w++] = s[r];
+    }
+    if (w>0 && s[w-1]==' ') w--;
+    s[w]='\0';
+}
+
+static void make_label_from_filename(const char* filename, char* out, size_t outsz) {
+    /* get base name (after last '/') */
+    const char* base = filename;
+    const char* slash = strrchr(filename, '/');
+    if (slash) base = slash + 1;
+
+    /* copy and strip extension */
+    size_t n = strlen(base);
+    if (n >= outsz) n = outsz - 1;
+    memcpy(out, base, n);
+    out[n] = '\0';
+    char* dot = strrchr(out, '.');
+    if (dot) *dot = '\0';
+
+    titlecase_inplace(out);
+
+    /* Special: "ChNN ..." => "Chapter NN — ..." */
+    if ((out[0]=='C' || out[0]=='c') && (out[1]=='h' || out[1]=='H')) {
+        size_t i=2; while (out[i]==' ') i++;
+        size_t j=i; unsigned num=0; int had_digit=0;
+        while (isdigit((unsigned char)out[j])) { had_digit=1; num = num*10u + (unsigned)(out[j]-'0'); j++; }
+        if (had_digit) {
+            /* Build "Chapter <num> — <rest>" */
+            char rest[256]; size_t k=0;
+            while (out[j]==' ') j++;
+            for (; out[j] && k+1<sizeof(rest); ++j) rest[k++] = out[j];
+            rest[k]='\0';
+
+            char tmp[512];
+            if (rest[0]) snprintf(tmp, sizeof(tmp), "Chapter %u — %s", num, rest);
+            else         snprintf(tmp, sizeof(tmp), "Chapter %u", num);
+            snprintf(out, outsz, "%s", tmp);
+        }
+    }
+}
+
+/* Create workspace/toc.md by scanning workspace/chapters (skip PDFs) */
+static int generate_toc_md(const char* book_title) {
+    const char* root = "workspace/chapters";
+    if (!helper_exists_file(root)) {
+        /* nothing to do (no chapters yet) */
+        return 0;
+    }
+
+    StrList files; sl_init(&files);
+    int rc = ingest_walk(root, NULL, &files);
+    if (rc != 0) { sl_free(&files); return 1; }
+
+    /* keep only .md/.markdown/.txt for TOC */
+    /* also prefix 'chapters/' to create link targets */
+    StrList kept; sl_init(&kept);
+    for (size_t i=0; i<files.count; ++i) {
+        const char* rel = files.items[i];
+        if (endswith_ic(rel,".pdf")) continue;
+
+        /* normalize already '/', just ensure we're "chapters/rel" */
+        int need = snprintf(NULL, 0, "chapters/%s", rel);
+        if (need < 0) { sl_free(&files); sl_free(&kept); return 1; }
+        char* path = (char*)malloc((size_t)need + 1);
+        if (!path) { sl_free(&files); sl_free(&kept); return 1; }
+        snprintf(path, (size_t)need + 1, "chapters/%s", rel);
+        if (sl_push(&kept, path) != 0) { free(path); sl_free(&files); sl_free(&kept); return 1; }
+        free(path);
+    }
+    sl_free(&files);
+
+    if (kept.count > 1) {
+        qsort(kept.items, kept.count, sizeof(char*), qsort_nat_ci_cmp);
+    }
+
+    (void)mkpath("workspace");
+    const char* outpath = "workspace/toc.md";
+
+    /* Estimate size and build content */
+    size_t est = 1024 + kept.count * 160;
+    char* buf = (char*)malloc(est);
+    if (!buf) { sl_free(&kept); return 1; }
+
+    int n = snprintf(buf, est,
+        "# Table of Contents — %s\n\n"
+        "> Draft TOC generated from `workspace/chapters/`.\n\n",
+        (book_title && *book_title) ? book_title : "Untitled");
+    if (n < 0) { free(buf); sl_free(&kept); return 1; }
+    size_t used = (size_t)n;
+
+    if (kept.count == 0) {
+        n = snprintf(buf + used, est - used, "_No chapters found yet._\n");
+        if (n < 0) { free(buf); sl_free(&kept); return 1; }
+        used += (size_t)n;
+    } else {
+        for (size_t i=0; i<kept.count; ++i) {
+            const char* link = kept.items[i];
+            /* label from filename */
+            char label[256];
+            make_label_from_filename(link, label, sizeof(label));
+
+            n = snprintf(buf + used, est - used, "- [%s](<%s>)\n", label, link);
+            if (n < 0) { free(buf); sl_free(&kept); return 1; }
+            used += (size_t)n;
+
+            if (used + 256 > est) {
+                est *= 2;
+                char* tmp = (char*)realloc(buf, est);
+                if (!tmp) { free(buf); sl_free(&kept); return 1; }
+                buf = tmp;
+            }
+        }
+    }
+
+    int wr = write_file(outpath, buf);
+    free(buf);
+    sl_free(&kept);
+
+    if (wr == 0) printf("[toc] wrote: %s\n", outpath);
+    else         fprintf(stderr, "[toc] ERROR: failed to write %s\n", outpath);
+
+    return wr == 0 ? 0 : 1;
 }
 
 /*=============================== INIT ======================================*/
@@ -802,12 +976,14 @@ static int cmd_build(void) {
         }
     }
 
-    /* 4) Compute slug, date (for folder), and full timestamp (for info) */
+    /* 4) Generate a draft workspace/toc.md from normalized chapters */
+    (void)generate_toc_md(title);
+
+    /* 5) Compute slug/date/stamp and prepare outputs/<slug>/<YYYY-MM-DD> */
     char slug[256]; slugify(title, slug, sizeof(slug));
     char day[32];   build_date_utc(day, sizeof(day));
     char stamp[64]; build_timestamp_utc(stamp, sizeof(stamp));
 
-    /* 5) Root is date-only: outputs/<slug>/<YYYY-MM-DD> */
     char root[512];
     snprintf(root,sizeof(root),"outputs%c%s%c%s",PATH_SEP,slug,PATH_SEP,day);
 
@@ -821,7 +997,6 @@ static int cmd_build(void) {
     }
     (void)mkpath(root);
 
-    /* 6) Create standard subdirs */
     const char *sub[] = {"pdf","docx","epub","html","md","cover","video-scripts","site",NULL};
     for (int i=0; sub[i]!=NULL; ++i) {
         char p[640];
@@ -829,7 +1004,6 @@ static int cmd_build(void) {
         if (mkpath(p)!=0) fprintf(stderr,"[build] WARN: cannot create %s\n",p);
     }
 
-    /* 7) Write BUILDINFO.txt */
     char info_path[640]; snprintf(info_path,sizeof(info_path),"%s%cBUILDINFO.txt",root,PATH_SEP);
     char info[1024];
     int n = snprintf(info,sizeof(info),
@@ -838,7 +1012,6 @@ static int cmd_build(void) {
     if (n<0 || n>=(int)sizeof(info)) fprintf(stderr,"[build] WARN: info truncated\n");
     if (write_file(info_path, info)!=0) { fprintf(stderr,"[build] ERROR: cannot write BUILDINFO.txt\n"); return 1; }
 
-    /* 8) Auto-generate site/index.html */
     char site_dir[640]; snprintf(site_dir,sizeof(site_dir),"%s%c%s",root,PATH_SEP,"site");
     if (write_site_index(site_dir, title, author, slug, stamp) != 0) {
         fprintf(stderr,"[build] WARN: could not write site/index.html\n");
@@ -850,8 +1023,6 @@ static int cmd_build(void) {
 }
 
 /*============================== SERVE ======================================*/
-
-/* MIME type guess for static files */
 static const char* serve_guess_mime(const char* path) {
     const char *dot = strrchr(path, '.');
     if (!dot) return "application/octet-stream";
@@ -867,8 +1038,6 @@ static const char* serve_guess_mime(const char* path) {
     if (!strcmp(dot,".txt")||!strcmp(dot,".md")) return "text/plain; charset=utf-8";
     return "application/octet-stream";
 }
-
-/* Safe path join: root + uri -> out; blocks ".." */
 static int serve_build_fs_path(char* out, size_t outsz, const char* root, const char* uri) {
     if (!uri || !*uri) uri = "/";
     if (strstr(uri, "..")) return -1;
@@ -892,8 +1061,6 @@ static int serve_build_fs_path(char* out, size_t outsz, const char* root, const 
     snprintf(out, outsz, "%s%c%s", root, PATH_SEP, rel);
     return 0;
 }
-
-/* Send all bytes */
 static int serve_send_all(sock_t s, const char* buf, size_t len) {
     size_t sent = 0;
     while (sent < len) {
@@ -907,8 +1074,6 @@ static int serve_send_all(sock_t s, const char* buf, size_t len) {
     }
     return 0;
 }
-
-/* Handle one HTTP GET request */
 static void serve_handle_client(sock_t cs, const char* root) {
     char req[2048]; memset(req, 0, sizeof(req));
 #ifdef _WIN32
@@ -966,6 +1131,13 @@ static void serve_handle_client(sock_t cs, const char* root) {
     free(buf);
     closesock(cs);
 }
+
+/*=========================== usage & dispatch ===============================*/
+static void usage(void) {
+    printf("uaengine %s\n", UENG_VERSION);
+    printf("Usage: uaengine <init|ingest|build|serve|publish|--version>\n");
+}
+static int cmd_publish(void) { puts("[publish] repo (TODO)"); return 0; }
 
 /* The serve command: uaengine serve <dir> [port] */
 static int cmd_serve(int argc, char** argv) {
@@ -1033,13 +1205,6 @@ cleanup_ws:
 #endif
     return 0;
 }
-
-/*=========================== usage & dispatch ===============================*/
-static void usage(void) {
-    printf("uaengine %s\n", UENG_VERSION);
-    printf("Usage: uaengine <init|ingest|build|serve|publish|--version>\n");
-}
-static int cmd_publish(void) { puts("[publish] repo (TODO)"); return 0; }
 
 /* Entry */
 int main(int argc, char **argv) {
