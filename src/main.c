@@ -15,7 +15,7 @@
  *                 CLEAN target (overwrite), write BUILDINFO.txt,
  *                 auto-generate workspace/toc.md, frontmatter.md,
  *                 acknowledgements.md, cover.svg/frontcover.md,
- *                 and site/index.html (with cover preview copied into site/)
+ *                 pack workspace/book-draft.md, and site/index.html.
  *     - serve   : tiny static HTTP server.
  *                 `uaengine serve` (no args) serves today's site output.
  *
@@ -49,13 +49,17 @@ static int  write_site_index(const char* site_dir,
                              const char* author,
                              const char* slug,
                              const char* stamp,
-                             int has_cover);
+                             int has_cover,
+                             int has_draft);
 
 static int  generate_toc_md(const char* book_title);
 static int  generate_frontmatter_md(const char* title, const char* author);
 static int  generate_acknowledgements_md(const char* author);
 static int  generate_cover_svg(const char* title, const char* author, const char* slug);
 static int  generate_frontcover_md(const char* title, const char* author, const char* slug);
+static int  pack_book_draft(const char* title,
+                            const char* outputs_root,
+                            int* out_has_draft);
 
 /*--- Platform-specific includes for directory & sockets --------------------*/
 #ifdef _WIN32
@@ -197,6 +201,22 @@ static int write_file(const char *path, const char *content) {
     if (!f) { fprintf(stderr, "[write] ERROR: cannot open '%s' for writing\n", path); return -1; }
     if (content && *content) fputs(content, f);
     fclose(f);
+    return 0;
+}
+
+/*-----------------------------------------------------------------------------
+ * append_file — append bytes of src file into an already open dst (binary)
+ *---------------------------------------------------------------------------*/
+static int append_file(FILE* dst, const char* src_path) {
+    FILE* src = ueng_fopen(src_path, "rb");
+    if (!src) return -1;
+    char buf[64*1024];
+    size_t rd;
+    while ((rd = fread(buf, 1, sizeof(buf), src)) > 0) {
+        size_t wr = fwrite(buf, 1, rd, dst);
+        if (wr != rd) { fclose(src); return -1; }
+    }
+    fclose(src);
     return 0;
 }
 
@@ -832,7 +852,7 @@ static int generate_toc_md(const char* book_title) {
         const char* base = rel;
         const char* slash = strrchr(rel, '/');
         if (slash) base = slash + 1;
-        if (base[0] == '_') continue;
+        if (base[0] == '_') continue;     /* skip helper files */
         if (endswith_ic(rel,".pdf")) continue;
 
         int need = snprintf(NULL, 0, "chapters/%s", rel);
@@ -1044,6 +1064,109 @@ static int generate_frontcover_md(const char* title, const char* author, const c
     return wr == 0 ? 0 : 1;
 }
 
+/*========================= PACK: workspace/book-draft.md ====================*/
+/*
+ * Concatenate:
+ *  - workspace/frontmatter.md
+ *  - workspace/toc.md
+ *  - every file under workspace/chapters (natural-sorted, skip "_" and PDFs)
+ *  - workspace/acknowledgements.md
+ *
+ * Then copy the resulting file into:
+ *   outputs/<slug>/<YYYY-MM-DD>/md/book-draft.md
+ *   outputs/<slug>/<YYYY-MM-DD>/site/book-draft.md  (for easy download in preview)
+ */
+static int list_chapter_files(StrList* out_rel) {
+    const char* root = "workspace/chapters";
+    if (!helper_exists_file(root)) return 0;
+    StrList all; sl_init(&all);
+    if (ingest_walk(root, NULL, &all) != 0) { sl_free(&all); return -1; }
+
+    for (size_t i=0; i<all.count; ++i) {
+        const char* rel = all.items[i];
+        const char* base = rel;
+        const char* slash = strrchr(rel, '/');
+        if (slash) base = slash + 1;
+        if (base[0] == '_') continue;                 /* skip helper files */
+        if (endswith_ic(rel, ".pdf")) continue;       /* skip PDFs */
+        /* include md/markdown/txt only */
+        if (!(endswith_ic(rel, ".md") || endswith_ic(rel, ".markdown") || endswith_ic(rel, ".txt")))
+            continue;
+
+        /* store full path relative to workspace (for appending) */
+        int need = snprintf(NULL, 0, "workspace/chapters/%s", rel);
+        if (need < 0) { sl_free(&all); return -1; }
+        char* path = (char*)malloc((size_t)need + 1);
+        if (!path) { sl_free(&all); return -1; }
+        snprintf(path, (size_t)need + 1, "workspace/chapters/%s", rel);
+        if (sl_push(out_rel, path) != 0) { free(path); sl_free(&all); return -1; }
+        free(path);
+    }
+    sl_free(&all);
+    if (out_rel->count > 1) qsort(out_rel->items, out_rel->count, sizeof(char*), qsort_nat_ci_cmp);
+    return 0;
+}
+
+static int pack_book_draft(const char* title,
+                           const char* outputs_root,
+                           int* out_has_draft) {
+    if (out_has_draft) *out_has_draft = 0;
+    (void)mkpath("workspace");
+
+    const char* ws_draft = "workspace/book-draft.md";
+    FILE* out = ueng_fopen(ws_draft, "wb");
+    if (!out) { fprintf(stderr, "[pack] ERROR: open %s\n", ws_draft); return 1; }
+
+    /* Helper to append a separator line between sections */
+    const char* SEP = "\n\n---\n\n";
+
+    /* 1) frontmatter */
+    if (helper_exists_file("workspace/frontmatter.md")) {
+        if (append_file(out, "workspace/frontmatter.md") != 0) { fclose(out); return 1; }
+    } else {
+        /* minimal header if frontmatter missing */
+        fprintf(out, "# %s\n\n", (title && *title) ? title : "Untitled");
+    }
+
+    /* 2) toc */
+    if (helper_exists_file("workspace/toc.md")) {
+        fputs(SEP, out);
+        if (append_file(out, "workspace/toc.md") != 0) { fclose(out); return 1; }
+    }
+
+    /* 3) chapters */
+    StrList chapters; sl_init(&chapters);
+    if (list_chapter_files(&chapters) != 0) { fclose(out); sl_free(&chapters); return 1; }
+    for (size_t i=0; i<chapters.count; ++i) {
+        fputs(SEP, out);
+        if (append_file(out, chapters.items[i]) != 0) { fclose(out); sl_free(&chapters); return 1; }
+    }
+    sl_free(&chapters);
+
+    /* 4) acknowledgements */
+    if (helper_exists_file("workspace/acknowledgements.md")) {
+        fputs(SEP, out);
+        if (append_file(out, "workspace/acknowledgements.md") != 0) { fclose(out); return 1; }
+    }
+
+    fclose(out);
+    printf("[pack] wrote: %s\n", ws_draft);
+
+    /* Also copy into outputs/.../md/ and site/ for preview/download */
+    char dst_md[1024];  snprintf(dst_md,  sizeof(dst_md),  "%s%cmd%cbook-draft.md",  outputs_root, PATH_SEP, PATH_SEP);
+    char dst_site[1024];snprintf(dst_site,sizeof(dst_site),"%s%csite%cbook-draft.md", outputs_root, PATH_SEP, PATH_SEP);
+
+    if (copy_file_binary(ws_draft, dst_md) == 0) {
+        printf("[pack] copied: %s\n", dst_md);
+    }
+    if (copy_file_binary(ws_draft, dst_site) == 0) {
+        printf("[pack] copied: %s\n", dst_site);
+        if (out_has_draft) *out_has_draft = 1;
+    }
+
+    return 0;
+}
+
 /*=============================== INIT ======================================*/
 static int cmd_init(void) {
     const char *dirs[] = {
@@ -1064,12 +1187,16 @@ static int write_site_index(const char* site_dir,
                             const char* author,
                             const char* slug,
                             const char* stamp,
-                            int has_cover) {
+                            int has_cover,
+                            int has_draft) {
     char path[1024];
     if (snprintf(path, sizeof(path), "%s%cindex.html", site_dir, PATH_SEP) < 0) return -1;
 
     const char* cover_block =
 "    <img src=\"cover.svg\" alt=\"Cover\" style=\"max-width:100%%;height:auto;border:1px solid #ddd;border-radius:12px;margin-top:1rem\"/>\n";
+
+    const char* draft_block =
+"    <p><a href=\"book-draft.md\" download>Download book-draft.md</a></p>\n";
 
     const char* tpl_a =
 "<!doctype html>\n"
@@ -1098,7 +1225,10 @@ static int write_site_index(const char* site_dir,
 "</html>\n";
 
     size_t est = strlen(tpl_a) + strlen(title)*2 + strlen(author) + strlen(slug) + strlen(stamp)
-               + strlen(tpl_b) + (has_cover ? strlen(cover_block) : 0) + 256;
+               + strlen(tpl_b)
+               + (has_cover ? strlen(cover_block) : 0)
+               + (has_draft ? strlen(draft_block) : 0)
+               + 256;
     char* html = (char*)malloc(est);
     if (!html) return -1;
 
@@ -1108,6 +1238,11 @@ static int write_site_index(const char* site_dir,
 
     if (has_cover) {
         n = (int)snprintf(html + used, est - used, "%s", cover_block);
+        if (n < 0) { free(html); return -1; }
+        used += (size_t)n;
+    }
+    if (has_draft) {
+        n = (int)snprintf(html + used, est - used, "%s", draft_block);
         if (n < 0) { free(html); return -1; }
         used += (size_t)n;
     }
@@ -1181,10 +1316,8 @@ static int cmd_build(void) {
     }
 
     /* 6) Cover: generate or pick user one; copy to cover/ and also into site/ */
-    /* Prefer user-provided cover in workspace/cover.svg; if not present, generate it. */
     char ws_cover[640]; snprintf(ws_cover, sizeof(ws_cover), "workspace%ccover.svg", PATH_SEP);
     if (!helper_exists_file(ws_cover)) {
-        /* Some users may have dropped it under chapters by mistake; accept that too. */
         char ws_chap_cover[640]; snprintf(ws_chap_cover, sizeof(ws_chap_cover), "workspace%cchapters%ccover.svg", PATH_SEP, PATH_SEP);
         if (helper_exists_file(ws_chap_cover)) {
             (void)copy_file_binary(ws_chap_cover, ws_cover);
@@ -1202,7 +1335,6 @@ static int cmd_build(void) {
             has_cover = helper_exists_file(cover_dst_archive);
             if (has_cover) printf("[cover] copied (archive): %s\n", cover_dst_archive);
         }
-        /* copy also into site root so the server can serve it without .. */
         if (copy_file_binary(ws_cover, cover_dst_site) == 0) {
             if (helper_exists_file(cover_dst_site)) {
                 printf("[cover] copied (site): %s\n", cover_dst_site);
@@ -1220,9 +1352,15 @@ static int cmd_build(void) {
     if (n<0 || n>=(int)sizeof(info)) fprintf(stderr,"[build] WARN: info truncated\n");
     if (write_file(info_path, info)!=0) { fprintf(stderr,"[build] ERROR: cannot write BUILDINFO.txt\n"); return 1; }
 
-    /* 8) Auto-generate site/index.html (now references cover.svg in site/) */
+    /* 8) Pack a single Markdown draft and copy it into md/ and site/ */
+    int has_draft = 0;
+    if (pack_book_draft(title, root, &has_draft) != 0) {
+        fprintf(stderr, "[build] WARN: failed to create book-draft.md\n");
+    }
+
+    /* 9) Auto-generate site/index.html (cover + draft link if present) */
     char site_dir[640]; snprintf(site_dir,sizeof(site_dir),"%s%c%s",root,PATH_SEP,"site");
-    if (write_site_index(site_dir, title, author, slug, stamp, has_cover) != 0) {
+    if (write_site_index(site_dir, title, author, slug, stamp, has_cover, has_draft) != 0) {
         fprintf(stderr,"[build] WARN: could not write site/index.html\n");
     }
 
