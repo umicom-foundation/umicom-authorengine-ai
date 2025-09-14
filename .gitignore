@@ -1,0 +1,19 @@
+﻿# Build artefacts
+/build/
+/CMakeFiles/
+/CMakeCache.txt
+*.sln
+*.vcxproj*
+*.user
+*.pdb
+*.ilk
+*.obj
+*.o
+*.exe
+
+# Engine working dirs
+/workspace/
+/outputs/
+
+# IDE
+.vscode/
