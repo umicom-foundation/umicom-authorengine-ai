@@ -14,8 +14,10 @@
  *                 into workspace/chapters/, create *date-based* outputs,
  *                 CLEAN target (overwrite), write BUILDINFO.txt,
  *                 auto-generate workspace/toc.md, frontmatter.md,
- *                 acknowledgements.md, and site/index.html
- *     - serve   : tiny static HTTP server to preview any folder (default: site/)
+ *                 acknowledgements.md, cover.svg/frontcover.md,
+ *                 and site/index.html (with cover preview if present)
+ *     - serve   : tiny static HTTP server.
+ *                 NEW: `uaengine serve` (no args) serves today's site output.
  *
  * DESIGN NOTES
  *   - C-first (C17 baseline), portable; small #ifdefs for Windows/POSIX.
@@ -23,12 +25,12 @@
  *   - No heavy deps: standard C + sockets + simple filesystem ops.
  *---------------------------------------------------------------------------*/
 
-#include <stdio.h>      /* printf, puts, fprintf, FILE, fopen/fclose, fputs, fgets, snprintf */
-#include <string.h>     /* strcmp, strlen, memcpy, memmove, strchr, strncmp */
-#include <stdlib.h>     /* malloc, free, strtol, qsort, realloc */
-#include <errno.h>      /* errno, EEXIST */
-#include <ctype.h>      /* isalnum, isspace, tolower, toupper, isdigit */
-#include <time.h>       /* time, gmtime, strftime */
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <ctype.h>
+#include <time.h>
 #include "ueng/version.h"
 
 /*---- Forward declarations for commands & helpers --------------------------*/
@@ -41,15 +43,19 @@ static void usage(void);
 
 static void build_date_utc(char* out, size_t outsz);
 static void build_timestamp_utc(char* out, size_t outsz);
+
 static int  write_site_index(const char* site_dir,
                              const char* title,
                              const char* author,
                              const char* slug,
-                             const char* stamp);
+                             const char* stamp,
+                             int has_cover);
 
 static int  generate_toc_md(const char* book_title);
 static int  generate_frontmatter_md(const char* title, const char* author);
 static int  generate_acknowledgements_md(const char* author);
+static int  generate_cover_svg(const char* title, const char* author, const char* slug);
+static int  generate_frontcover_md(const char* title, const char* author, const char* slug);
 
 /*--- Platform-specific includes for directory & sockets --------------------*/
 #ifdef _WIN32
@@ -58,7 +64,7 @@ static int  generate_acknowledgements_md(const char* author);
   #include <io.h>         /* _access */
   #include <winsock2.h>   /* sockets */
   #include <ws2tcpip.h>   /* InetPtonA */
-  #include <windows.h>    /* FindFirstFileA, DeleteFileA, RemoveDirectoryA */
+  #include <windows.h>    /* FindFirstFileA, DeleteFileA, RemoveDirectoryA, SetFileAttributesA */
   #pragma comment(lib, "ws2_32.lib")
   #define PATH_SEP '\\'
   #define access _access
@@ -68,14 +74,14 @@ static int  generate_acknowledgements_md(const char* author);
   #define SOCK_INVALID INVALID_SOCKET
   #define closesock closesocket
 #else
-  #include <sys/stat.h>   /* mkdir, stat, lstat */
+  #include <sys/stat.h>
   #include <sys/types.h>
-  #include <unistd.h>     /* access, close, read, write, unlink */
-  #include <sys/socket.h> /* socket, bind, listen, accept, send, recv */
-  #include <netinet/in.h> /* sockaddr_in */
-  #include <arpa/inet.h>  /* inet_pton */
+  #include <unistd.h>
+  #include <sys/socket.h>
+  #include <netinet/in.h>
+  #include <arpa/inet.h>
   #include <netdb.h>
-  #include <dirent.h>     /* opendir, readdir, closedir */
+  #include <dirent.h>
   #define PATH_SEP '/'
   #define ACCESS_EXISTS 0
   static int make_dir(const char *path) { return mkdir(path, 0755); }
@@ -211,7 +217,7 @@ static int write_gitkeep(const char *dir) {
 }
 
 /*-----------------------------------------------------------------------------
- * seed_book_yaml — minimal starter manifest (only if book.yaml missing)
+ * seed_book_yaml — minimal starter manifest
  *---------------------------------------------------------------------------*/
 static int seed_book_yaml(void) {
     const char *yaml =
@@ -277,7 +283,7 @@ static int tiny_yaml_get_bool(const char* filename, const char* key, int* out) {
     for (char* p = buf; *p; ++p) *p = (char)tolower((unsigned char)*p);
     if (!strcmp(buf, "true") || !strcmp(buf, "yes") || !strcmp(buf, "on") || !strcmp(buf, "1")) { *out = 1; return 0; }
     if (!strcmp(buf, "false")|| !strcmp(buf, "no")  || !strcmp(buf, "off")|| !strcmp(buf, "0")) { *out = 0; return 0; }
-    *out = (buf[0] != '\0'); /* fallback: non-empty -> true */
+    *out = (buf[0] != '\0');
     return 0;
 }
 
@@ -363,6 +369,7 @@ static int clean_dir(const char* dir) {
     return rc;
 }
 #else
+#include <sys/stat.h>
 static int clean_dir(const char* dir) {
     if (!helper_exists_file(dir)) return 0;
     DIR* d = opendir(dir);
@@ -580,7 +587,7 @@ static int ingest_walk(const char* abs_dir, const char* rel_dir, StrList* out) {
 #endif
 
 /*-----------------------------------------------------------------------------
- * write_outline_md — used by cmd_ingest (ASCII dash for console-friendliness)
+ * write_outline_md — used by cmd_ingest (ASCII dash for console)
  *---------------------------------------------------------------------------*/
 static int write_outline_md(const char* title, const char* author,
                             const char* dropzone_rel, const StrList* files) {
@@ -697,10 +704,8 @@ static int copy_file_binary(const char* src, const char* dst) {
     return 0;
 }
 
-/* Strip a leading top-level "chapters/" segment if present (to avoid
-   workspace/chapters/chapters/... when users drop a "chapters" folder). */
+/* Strip top-level "chapters/" if present to avoid workspace/chapters/chapters/... */
 static const char* strip_leading_chapters(const char* rel) {
-    /* Find first segment length */
     size_t i = 0;
     while (rel[i] && rel[i] != '/' && rel[i] != '\\') i++;
     if (i == 8 &&
@@ -712,8 +717,8 @@ static const char* strip_leading_chapters(const char* rel) {
         (rel[5]=='e'||rel[5]=='E') &&
         (rel[6]=='r'||rel[6]=='R') &&
         (rel[7]=='s'||rel[7]=='S')) {
-        if (rel[i] == '/' || rel[i] == '\\') return rel + i + 1; /* skip "chapters/" */
-        return rel + i; /* just "chapters" */
+        if (rel[i] == '/' || rel[i] == '\\') return rel + i + 1;
+        return rel + i;
     }
     return rel;
 }
@@ -741,7 +746,6 @@ static int normalize_chapters(const char* dropzone) {
         char rel_native[1024]; snprintf(rel_native, sizeof(rel_native), "%s", rel);
         rel_to_native_sep(rel_native);
 
-        /* Drop top-level "chapters/" if present */
         const char* relp = strip_leading_chapters(rel_native);
         if (*relp == '\0') { skipped++; continue; }
 
@@ -826,7 +830,6 @@ static int generate_toc_md(const char* book_title) {
     for (size_t i=0; i<files.count; ++i) {
         const char* rel = files.items[i];
 
-        /* Skip PDFs and underscore-leading files (e.g. _manifest.txt) */
         const char* base = rel;
         const char* slash = strrchr(rel, '/');
         if (slash) base = slash + 1;
@@ -887,7 +890,7 @@ static int generate_toc_md(const char* book_title) {
     return wr == 0 ? 0 : 1;
 }
 
-/*===================== Frontmatter & Acknowledgements =======================*/
+/*===================== Frontmatter, Acknowledgements, Cover =================*/
 static int generate_frontmatter_md(const char* title, const char* author) {
     (void)mkpath("workspace");
 
@@ -954,7 +957,91 @@ static int generate_acknowledgements_md(const char* author) {
     int wr = write_file(outpath, tpl);
     if (wr == 0) printf("[ack] wrote: %s\n", outpath);
     else         fprintf(stderr, "[ack] ERROR: failed to write %s\n", outpath);
-    (void)author; /* reserved for future personalized thanks */
+    (void)author;
+    return wr == 0 ? 0 : 1;
+}
+
+/* Simple, fast SVG cover — editable by authors in workspace/cover.svg */
+static int generate_cover_svg(const char* title, const char* author, const char* slug) {
+    (void)mkpath("workspace");
+    const char* outpath = "workspace/cover.svg";
+
+    const char* tpl =
+"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1600\" height=\"2560\" viewBox=\"0 0 1600 2560\">\n"
+"  <defs>\n"
+"    <linearGradient id=\"g\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\">\n"
+"      <stop offset=\"0%\" stop-color=\"#0ea5e9\"/>\n"
+"      <stop offset=\"100%\" stop-color=\"#22c55e\"/>\n"
+"    </linearGradient>\n"
+"  </defs>\n"
+"  <rect width=\"1600\" height=\"2560\" fill=\"url(#g)\"/>\n"
+"  <rect x=\"80\" y=\"80\" width=\"1440\" height=\"2400\" rx=\"48\" fill=\"#ffffff\" opacity=\"0.08\"/>\n"
+"  <g font-family=\"Segoe UI, Roboto, Ubuntu, Arial, sans-serif\" fill=\"#0f172a\">\n"
+"    <text x=\"120\" y=\"520\" font-size=\"88\" opacity=\"0.8\">Umicom AuthorEngine AI</text>\n"
+"    <text x=\"120\" y=\"720\" font-size=\"128\" font-weight=\"700\">%s</text>\n"
+"    <text x=\"120\" y=\"860\" font-size=\"64\" opacity=\"0.8\">by %s</text>\n"
+"  </g>\n"
+"  <g font-family=\"Consolas, Menlo, monospace\" fill=\"#0f172a\" opacity=\"0.75\">\n"
+"    <text x=\"120\" y=\"2360\" font-size=\"40\">slug: %s</text>\n"
+"  </g>\n"
+"</svg>\n";
+
+    int need = snprintf(NULL, 0, tpl, (title && *title)? title : "Untitled",
+                                  (author && *author)? author : "Unknown",
+                                  (slug && *slug)? slug : "untitled");
+    if (need < 0) return -1;
+    size_t size = (size_t)need + 1;
+
+    char* svg = (char*)malloc(size);
+    if (!svg) return -1;
+    (void)snprintf(svg, size, tpl, (title && *title)? title : "Untitled",
+                              (author && *author)? author : "Unknown",
+                              (slug && *slug)? slug : "untitled");
+
+    int wr = write_file(outpath, svg);
+    free(svg);
+    if (wr == 0) printf("[cover] wrote: %s\n", outpath);
+    else         fprintf(stderr, "[cover] ERROR: failed to write %s\n", outpath);
+    return wr == 0 ? 0 : 1;
+}
+
+/* A tiny guide that points authors at the editable SVG */
+static int generate_frontcover_md(const char* title, const char* author, const char* slug) {
+    (void)mkpath("workspace");
+    const char* outpath = "workspace/frontcover.md";
+
+    char day[32]; build_date_utc(day, sizeof(day));
+
+    const char* tpl =
+"# Front Cover\n\n"
+"A starter cover has been generated at `workspace/cover.svg`.\n"
+"Edit that file (SVG is just text), then run `uaengine build` again to copy it into the outputs.\n\n"
+"**Title:** %s  \n"
+"**Author:** %s  \n"
+"**Slug:** %s  \n"
+"**Date:** %s  \n";
+
+    int need = snprintf(NULL, 0, tpl,
+                        (title && *title)? title : "Untitled",
+                        (author && *author)? author : "Unknown",
+                        (slug && *slug)? slug : "untitled",
+                        day);
+    if (need < 0) return -1;
+    size_t size = (size_t)need + 1;
+
+    char* md = (char*)malloc(size);
+    if (!md) return -1;
+    (void)snprintf(md, size, tpl,
+                   (title && *title)? title : "Untitled",
+                   (author && *author)? author : "Unknown",
+                   (slug && *slug)? slug : "untitled",
+                   day);
+
+    int wr = write_file(outpath, md);
+    free(md);
+    if (wr == 0) printf("[frontcover] wrote: %s\n", outpath);
+    else         fprintf(stderr, "[frontcover] ERROR: failed to write %s\n", outpath);
     return wr == 0 ? 0 : 1;
 }
 
@@ -977,11 +1064,15 @@ static int write_site_index(const char* site_dir,
                             const char* title,
                             const char* author,
                             const char* slug,
-                            const char* stamp) {
+                            const char* stamp,
+                            int has_cover) {
     char path[1024];
     if (snprintf(path, sizeof(path), "%s%cindex.html", site_dir, PATH_SEP) < 0) return -1;
 
-    const char* tpl =
+    const char* cover_block =
+"    <img src=\"../cover/cover.svg\" alt=\"Cover\" style=\"max-width:100%%;height:auto;border:1px solid #ddd;border-radius:12px;margin-top:1rem\"/>\n";
+
+    const char* tpl_a =
 "<!doctype html>\n"
 "<html lang=\"en\">\n"
 "<head>\n"
@@ -990,7 +1081,7 @@ static int write_site_index(const char* site_dir,
 "  <title>%s — Umicom AuthorEngine AI</title>\n"
 "  <style>\n"
 "    body{font-family:system-ui,-apple-system,\"Segoe UI\",Roboto,Ubuntu,sans-serif;margin:2rem;line-height:1.5}\n"
-"    .card{border:1px solid #ddd;border-radius:12px;padding:1.5rem;max-width:800px}\n"
+"    .card{border:1px solid #ddd;border-radius:12px;padding:1.5rem;max-width:900px}\n"
 "    code{background:#f6f8fa;padding:2px 6px;border-radius:6px}\n"
 "    .muted{color:#666}\n"
 "  </style>\n"
@@ -999,21 +1090,36 @@ static int write_site_index(const char* site_dir,
 "  <div class=\"card\">\n"
 "    <h1>%s</h1>\n"
 "    <p class=\"muted\">by %s</p>\n"
-"    <p><strong>Slug:</strong> <code>%s</code><br><strong>Build:</strong> <code>%s</code></p>\n"
+"    <p><strong>Slug:</strong> <code>%s</code><br><strong>Build:</strong> <code>%s</code></p>\n";
+
+    const char* tpl_b =
 "    <p>This site was generated by <strong>Umicom AuthorEngine AI</strong>. Replace this page with your own content during the render stage.</p>\n"
 "  </div>\n"
 "</body>\n"
 "</html>\n";
-    int need = snprintf(NULL, 0, tpl, title, title, author, slug, stamp);
-    if (need < 0) return -1;
-    size_t size = (size_t)need + 1;
 
-    char* html = (char*)malloc(size);
+    /* build full HTML in memory */
+    size_t est = strlen(tpl_a) + strlen(title)*2 + strlen(author) + strlen(slug) + strlen(stamp)
+               + strlen(tpl_b) + (has_cover ? strlen(cover_block) : 0) + 256;
+    char* html = (char*)malloc(est);
     if (!html) return -1;
-    (void)snprintf(html, size, tpl, title, title, author, slug, stamp);
-    if (write_file(path, html) != 0) { free(html); return -1; }
+
+    int n = snprintf(html, est, tpl_a, title, title, author, slug, stamp);
+    if (n < 0) { free(html); return -1; }
+    size_t used = (size_t)n;
+
+    if (has_cover) {
+        n = (int)snprintf(html + used, est - used, "%s", cover_block);
+        if (n < 0) { free(html); return -1; }
+        used += (size_t)n;
+    }
+
+    n = snprintf(html + used, est - used, "%s", tpl_b);
+    if (n < 0) { free(html); return -1; }
+
+    int wr = write_file(path, html);
     free(html);
-    return 0;
+    return (wr == 0) ? 0 : -1;
 }
 
 static int cmd_build(void) {
@@ -1076,6 +1182,20 @@ static int cmd_build(void) {
         if (mkpath(p)!=0) fprintf(stderr,"[build] WARN: cannot create %s\n",p);
     }
 
+    /* 6) Cover: generate in workspace, then copy to outputs/.../cover/cover.svg */
+    (void)generate_cover_svg(title, author, slug);
+    (void)generate_frontcover_md(title, author, slug);
+    char cover_src[640]; snprintf(cover_src, sizeof(cover_src), "workspace%ccover.svg", PATH_SEP);
+    char cover_dst[640]; snprintf(cover_dst, sizeof(cover_dst), "%s%ccover%ccover.svg", root, PATH_SEP, PATH_SEP);
+    int has_cover = 0;
+    if (helper_exists_file(cover_src)) {
+        if (copy_file_binary(cover_src, cover_dst) == 0) {
+            has_cover = helper_exists_file(cover_dst);
+            if (has_cover) printf("[cover] copied: %s\n", cover_dst);
+        }
+    }
+
+    /* 7) Write BUILDINFO.txt */
     char info_path[640]; snprintf(info_path,sizeof(info_path),"%s%cBUILDINFO.txt",root,PATH_SEP);
     char info[1024];
     int n = snprintf(info,sizeof(info),
@@ -1084,8 +1204,9 @@ static int cmd_build(void) {
     if (n<0 || n>=(int)sizeof(info)) fprintf(stderr,"[build] WARN: info truncated\n");
     if (write_file(info_path, info)!=0) { fprintf(stderr,"[build] ERROR: cannot write BUILDINFO.txt\n"); return 1; }
 
+    /* 8) Auto-generate site/index.html (now aware of cover) */
     char site_dir[640]; snprintf(site_dir,sizeof(site_dir),"%s%c%s",root,PATH_SEP,"site");
-    if (write_site_index(site_dir, title, author, slug, stamp) != 0) {
+    if (write_site_index(site_dir, title, author, slug, stamp, has_cover) != 0) {
         fprintf(stderr,"[build] WARN: could not write site/index.html\n");
     }
 
@@ -1211,21 +1332,54 @@ static void usage(void) {
 }
 static int cmd_publish(void) { puts("[publish] repo (TODO)"); return 0; }
 
-/* The serve command: uaengine serve <dir> [port] */
+/* Convenience: `uaengine serve` uses today's outputs/<slug>/<YYYY-MM-DD>/site */
 static int cmd_serve(int argc, char** argv) {
-    if (argc < 3) {
-        puts("Usage: uaengine serve <folder-to-serve> [port]");
-        puts("Example: uaengine serve outputs/my-book/2025-09-14/site 8080");
-        return 1;
-    }
-    const char* root = argv[2];
+    char auto_root[1024] = {0};
+    const char* root = NULL;
     int port = 8080;
-    if (argc >= 4) {
-        long p = strtol(argv[3], NULL, 10);
-        if (p > 0 && p < 65536) port = (int)p;
+
+    int auto_mode = 0;
+    if (argc == 2) {
+        auto_mode = 1;
+    } else if (argc == 3) {
+        /* Could be a port or a folder; detect: if all digits -> port; else -> folder */
+        int alldigit = 1;
+        for (const char* p = argv[2]; *p; ++p) if (!isdigit((unsigned char)*p)) { alldigit = 0; break; }
+        if (alldigit) { port = (int)strtol(argv[2], NULL, 10); auto_mode = 1; }
+        else root = argv[2];
+    } else {
+        root = argv[2];
+        if (argc >= 4) {
+            long p = strtol(argv[3], NULL, 10);
+            if (p > 0 && p < 65536) port = (int)p;
+        }
+    }
+
+    if (auto_mode) {
+        char title[256]={0}, slug[256]={0}, day[32]={0};
+        if (tiny_yaml_get("book.yaml","title", title,sizeof(title)) != 0) snprintf(title,sizeof(title),"%s","Untitled");
+        slugify(title, slug, sizeof(slug));
+        build_date_utc(day, sizeof(day));
+        snprintf(auto_root, sizeof(auto_root), "outputs%c%s%c%s%ccurrent%s", PATH_SEP, slug, PATH_SEP, day, PATH_SEP, "");
+        /* Prefer today's dated folder; if that exact folder is missing, try legacy date-only path without /current */
+        if (!helper_exists_file(auto_root)) {
+            snprintf(auto_root, sizeof(auto_root), "outputs%c%s%c%s%csite", PATH_SEP, slug, PATH_SEP, day, PATH_SEP);
+        } else {
+            /* if 'current' exists, serve its 'site' */
+            snprintf(auto_root, sizeof(auto_root), "outputs%c%s%c%s%csite", PATH_SEP, slug, PATH_SEP, day, PATH_SEP);
+        }
+        root = auto_root;
+    }
+
+    if (!root) {
+        puts("Usage: uaengine serve [folder-to-serve] [port]");
+        puts("       uaengine serve              # auto: today's outputs/<slug>/<YYYY-MM-DD>/site");
+        puts("       uaengine serve 8080         # auto + custom port");
+        return 1;
     }
     if (!helper_exists_file(root)) {
         fprintf(stderr, "[serve] ERROR: folder does not exist: %s\n", root);
+        fprintf(stderr, "Hint: run `uaengine build` first.\n");
         return 1;
     }
 
