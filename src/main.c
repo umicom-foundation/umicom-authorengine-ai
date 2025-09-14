@@ -10,24 +10,40 @@
  *     - init    : prepare workspace + starter book.yaml
  *     - ingest  : scan dropzone recursively for .md/.markdown/.txt/.pdf and
  *                 draft workspace/outline.md (relative file list)
- *     - build   : read book.yaml, derive a slug, create *date-based* outputs,
- *                 CLEAN the target folder (overwrite behavior),
+ *     - build   : read book.yaml, optionally ingest first, derive a slug,
+ *                 create *date-based* outputs, CLEAN target (overwrite),
  *                 write BUILDINFO.txt and auto-generate site/index.html
  *     - serve   : tiny static HTTP server to preview any folder (default: site/)
  *
  * DESIGN NOTES
  *   - C-first (C17 baseline), portable; small #ifdefs for Windows/POSIX.
- *   - Safe string handling (snprintf/memcpy), careful allocation.
+ *   - Safer string handling (snprintf/memcpy), careful allocation.
  *   - No heavy deps: standard C + sockets + simple filesystem ops.
  *---------------------------------------------------------------------------*/
 
 #include <stdio.h>      /* printf, puts, fprintf, FILE, fopen/fclose, fputs, fgets, snprintf */
-#include <string.h>     /* strcmp, strlen, memcpy, memmove, strchr */
-#include <stdlib.h>     /* malloc, free, strtol, qsort */
+#include <string.h>     /* strcmp, strlen, memcpy, memmove, strchr, strncmp */
+#include <stdlib.h>     /* malloc, free, strtol, qsort, realloc */
 #include <errno.h>      /* errno, EEXIST */
 #include <ctype.h>      /* isalnum, isspace, tolower */
 #include <time.h>       /* time, gmtime, strftime */
 #include "ueng/version.h"
+
+/*---- Forward declarations for commands & helpers (C99 requires this) ----*/
+static int  cmd_init(void);
+static int  cmd_ingest(void);
+static int  cmd_build(void);
+static int  cmd_serve(int argc, char** argv);
+static int  cmd_publish(void);
+static void usage(void);
+
+static void build_date_utc(char* out, size_t outsz);
+static void build_timestamp_utc(char* out, size_t outsz);
+static int  write_site_index(const char* site_dir,
+                             const char* title,
+                             const char* author,
+                             const char* slug,
+                             const char* stamp);
 
 /*--- Platform-specific includes for directory & sockets --------------------*/
 #ifdef _WIN32
@@ -190,7 +206,7 @@ static int write_gitkeep(const char *dir) {
 }
 
 /*-----------------------------------------------------------------------------
- * seed_book_yaml — minimal starter manifest
+ * seed_book_yaml — minimal starter manifest (only if book.yaml missing)
  *---------------------------------------------------------------------------*/
 static int seed_book_yaml(void) {
     const char *yaml =
@@ -206,12 +222,14 @@ static int seed_book_yaml(void) {
         "  lesson_length_minutes: 10\n"
         "  total_lessons: 12\n"
         "site:\n"
-        "  enabled: true\n";
+        "  enabled: true\n"
+        "ingest_on_build: true\n";
     return write_text_file_if_absent("book.yaml", yaml);
 }
 
 /*-----------------------------------------------------------------------------
  * tiny_yaml_get — extract scalar "key: value" from book.yaml (simple)
+ *   Returns: 0 = found, 1 = not found, -1 = file error.
  *---------------------------------------------------------------------------*/
 static int tiny_yaml_get(const char* filename, const char* key, char* out, size_t outsz) {
     FILE* f = ueng_fopen(filename, "rb");
@@ -242,6 +260,21 @@ static int tiny_yaml_get(const char* filename, const char* key, char* out, size_
     }
     fclose(f);
     return found ? 0 : 1;
+}
+
+/*-----------------------------------------------------------------------------
+ * tiny_yaml_get_bool — reads key as true/false/yes/no/on/off/1/0 (case-insens.)
+ *   Returns: 0 = parsed, 1 = not found, -1 = file error.
+ *---------------------------------------------------------------------------*/
+static int tiny_yaml_get_bool(const char* filename, const char* key, int* out) {
+    char buf[64];
+    int rc = tiny_yaml_get(filename, key, buf, sizeof(buf));
+    if (rc != 0) return rc;
+    for (char* p = buf; *p; ++p) *p = (char)tolower((unsigned char)*p);
+    if (!strcmp(buf, "true") || !strcmp(buf, "yes") || !strcmp(buf, "on") || !strcmp(buf, "1")) { *out = 1; return 0; }
+    if (!strcmp(buf, "false")|| !strcmp(buf, "no")  || !strcmp(buf, "off")|| !strcmp(buf, "0")) { *out = 0; return 0; }
+    *out = (buf[0] != '\0'); /* fallback: non-empty -> true */
+    return 0;
 }
 
 /*-----------------------------------------------------------------------------
@@ -358,7 +391,7 @@ static int clean_dir(const char* dir) {
 }
 #endif
 
-/*========================= INGESTOR (new in this step) ======================*/
+/*========================= INGESTOR (lists sources) =========================*/
 
 /* Dynamic string list to collect discovered files (relative paths) */
 typedef struct {
@@ -400,7 +433,6 @@ static int ci_cmp(const char* a, const char* b) {
         a++; b++;
     }
 }
-
 /* qsort adapter */
 static int qsort_ci_cmp(const void* A, const void* B) {
     const char* a = *(const char* const*)A;
@@ -476,7 +508,6 @@ static int ingest_walk(const char* abs_dir, const char* rel_dir, StrList* out) {
     return rc;
 }
 #else
-#include <sys/stat.h>
 static int ingest_walk(const char* abs_dir, const char* rel_dir, StrList* out) {
     DIR* d = opendir(abs_dir);
     if (!d) return 0;
@@ -523,14 +554,11 @@ static int ingest_walk(const char* abs_dir, const char* rel_dir, StrList* out) {
 /* Write workspace/outline.md including Title/Author/Date and the file list */
 static int write_outline_md(const char* title, const char* author,
                             const char* dropzone_rel, const StrList* files) {
-    /* Ensure workspace exists */
     (void)mkpath("workspace");
 
     char path[512];
     snprintf(path, sizeof(path), "workspace%coutline.md", PATH_SEP);
 
-    /* Build Markdown content in one buffer for simplicity */
-    /* Rough size estimate to allocate once: header + per-file lines */
     size_t est = 1024 + files->count * 256;
     char* buf = (char*)malloc(est);
     if (!buf) return -1;
@@ -544,7 +572,6 @@ static int write_outline_md(const char* title, const char* author,
         "_Sources scanned:_ `%s`\n\n"
         "## Sources (recursive)\n",
         title, author, day, dropzone_rel ? dropzone_rel : "dropzone");
-
     if (n < 0) { free(buf); return -1; }
     size_t used = (size_t)n;
 
@@ -566,30 +593,25 @@ static int write_outline_md(const char* title, const char* author,
         }
     }
 
-    /* Final helpful note */
     n = snprintf(buf + used, est - used,
         "\n---\n"
         "_Tip:_ Add your chapters as **Markdown** files under `%s` and re-run `uaengine ingest`.\n",
         dropzone_rel ? dropzone_rel : "dropzone");
     if (n < 0) { free(buf); return -1; }
-    used += (size_t)n;
 
-    /* Write it */
     int rc = write_file(path, buf);
     free(buf);
     if (rc == 0) printf("[ingest] wrote: %s\n", path);
     return rc;
 }
 
-/* The `ingest` command */
+/* The `ingest` command (lists .md/.markdown/.txt/.pdf) */
 static int cmd_ingest(void) {
-    /* 1) Read config */
     char title[256]={0}, author[256]={0}, drop[256]={0};
     if (tiny_yaml_get("book.yaml","title", title,sizeof(title))  != 0) snprintf(title, sizeof(title),  "%s","Untitled");
     if (tiny_yaml_get("book.yaml","author",author,sizeof(author))!= 0) snprintf(author,sizeof(author), "%s","Unknown");
     if (tiny_yaml_get("book.yaml","dropzone",drop,sizeof(drop)) != 0) snprintf(drop, sizeof(drop),    "%s","dropzone");
 
-    /* 2) Walk dropzone recursively */
     if (!helper_exists_file(drop)) {
         fprintf(stderr, "[ingest] ERROR: dropzone path not found: %s\n", drop);
         return 1;
@@ -598,12 +620,10 @@ static int cmd_ingest(void) {
     int rc = ingest_walk(drop, NULL, &files);
     if (rc != 0) { fprintf(stderr, "[ingest] ERROR: directory walk failed\n"); sl_free(&files); return 1; }
 
-    /* 3) Sort results (case-insensitive) */
     if (files.count > 1) {
         qsort(files.items, files.count, sizeof(char*), qsort_ci_cmp);
     }
 
-    /* 4) Write workspace/outline.md */
     rc = write_outline_md(title, author, drop, &files);
     sl_free(&files);
     if (rc != 0) { fprintf(stderr, "[ingest] ERROR: failed to write outline\n"); return 1; }
@@ -612,13 +632,7 @@ static int cmd_ingest(void) {
     return 0;
 }
 
-/*=============================== BUILD =====================================*/
-static int write_site_index(const char* site_dir,
-                            const char* title,
-                            const char* author,
-                            const char* slug,
-                            const char* stamp);
-
+/*=============================== INIT ======================================*/
 static int cmd_init(void) {
     const char *dirs[] = {
         "dropzone","dropzone/images","workspace","outputs",
@@ -632,9 +646,14 @@ static int cmd_init(void) {
     puts("[init] complete."); return 0;
 }
 
-static void build_date_utc(char* out, size_t outsz);
-static void build_timestamp_utc(char* out, size_t outsz);
+/*=============================== BUILD =====================================*/
+static int write_site_index(const char* site_dir,
+                            const char* title,
+                            const char* author,
+                            const char* slug,
+                            const char* stamp);
 
+/* Build: optional auto-ingest; date-based outputs; clean; index page */
 static int cmd_build(void) {
     /* 1) Load metadata from book.yaml */
     char title[256]={0}, author[256]={0}; int rc;
@@ -645,16 +664,24 @@ static int cmd_build(void) {
     if (rc == -1) { fprintf(stderr,"[build] ERROR: cannot open book.yaml\n"); return 1; }
     if (rc ==  1) { snprintf(author,sizeof(author),"%s","Unknown"); }
 
-    /* 2) Compute slug, date (for folder), and full timestamp (for info) */
+    /* 2) Optionally run the ingestor first */
+    int ingest_first = 0;
+    if (tiny_yaml_get_bool("book.yaml", "ingest_on_build", &ingest_first) == 0 && ingest_first) {
+        puts("[build] ingest_on_build: true — running ingest...");
+        if (cmd_ingest() != 0) {
+            fprintf(stderr, "[build] WARN: ingest failed; continuing build.\n");
+        }
+    }
+
+    /* 3) Compute slug, date (for folder), and full timestamp (for info) */
     char slug[256]; slugify(title, slug, sizeof(slug));
     char day[32];   build_date_utc(day, sizeof(day));
     char stamp[64]; build_timestamp_utc(stamp, sizeof(stamp));
 
-    /* 3) Root is date-only: outputs/<slug>/<YYYY-MM-DD> */
+    /* 4) Root is date-only: outputs/<slug>/<YYYY-MM-DD> (overwrite behavior) */
     char root[512];
     snprintf(root,sizeof(root),"outputs%c%s%c%s",PATH_SEP,slug,PATH_SEP,day);
 
-    /* 4) If root exists, CLEAN it (remove children) to implement overwrite behavior */
     if (helper_exists_file(root)) {
         printf("[build] cleaning existing: %s\n", root);
         if (clean_dir(root) != 0) {
@@ -691,119 +718,6 @@ static int cmd_build(void) {
     printf("[build] ok: %s\n", root);
     puts("[build] outputs will be overwritten on subsequent builds for the same date.");
     return 0;
-}
-
-/*------------------------------ serve helpers -------------------------------*/
-static const char* guess_mime(const char* path) {
-    const char *dot = strrchr(path, '.');
-    if (!dot) return "application/octet-stream";
-    if (!strcmp(dot,".html")||!strcmp(dot,".htm")) return "text/html; charset=utf-8";
-    if (!strcmp(dot,".css"))  return "text/css; charset=utf-8";
-    if (!strcmp(dot,".js"))   return "application/javascript";
-    if (!strcmp(dot,".json")) return "application/json";
-    if (!strcmp(dot,".svg"))  return "image/svg+xml";
-    if (!strcmp(dot,".png"))  return "image/png";
-    if (!strcmp(dot,".jpg")||!strcmp(dot,".jpeg")) return "image/jpeg";
-    if (!strcmp(dot,".gif"))  return "image/gif";
-    if (!strcmp(dot,".ico"))  return "image/x-icon";
-    if (!strcmp(dot,".txt")||!strcmp(dot,".md")) return "text/plain; charset=utf-8";
-    return "application/octet-stream";
-}
-
-static int build_fs_path(char* out, size_t outsz, const char* root, const char* uri) {
-    if (!uri || !*uri) uri = "/";
-    if (strstr(uri, "..")) return -1;
-    size_t ulen = strcspn(uri, "?\r\n");
-    int need_index = (ulen == 1 && uri[0] == '/');
-
-    char rel[512]; size_t j = 0;
-    for (size_t i = 0; i < ulen && j + 1 < sizeof(rel); ++i) {
-        char c = uri[i];
-        if (i==0 && c=='/') continue;
-#ifdef _WIN32
-        if (c == '/') c = '\\';
-#endif
-        rel[j++] = c;
-    }
-    rel[j] = '\0';
-    if (need_index) snprintf(rel, sizeof(rel), "index.html");
-
-    int need = snprintf(NULL, 0, "%s%c%s", root, PATH_SEP, rel);
-    if (need < 0 || (size_t)need + 1 > outsz) return -1;
-    snprintf(out, outsz, "%s%c%s", root, PATH_SEP, rel);
-    return 0;
-}
-
-static int send_all(sock_t s, const char* buf, size_t len) {
-    size_t sent = 0;
-    while (sent < len) {
-#ifdef _WIN32
-        int n = send(s, buf + sent, (int)(len - sent), 0);
-#else
-        int n = (int)send(s, buf + sent, len - sent, 0);
-#endif
-        if (n <= 0) return -1;
-        sent += (size_t)n;
-    }
-    return 0;
-}
-
-static void handle_client(sock_t cs, const char* root) {
-    char req[2048]; memset(req, 0, sizeof(req));
-#ifdef _WIN32
-    int n = recv(cs, req, (int)sizeof(req)-1, 0);
-#else
-    int n = (int)recv(cs, req, sizeof(req)-1, 0);
-#endif
-    if (n <= 0) { closesock(cs); return; }
-
-    char method[8]={0}, uri[1024]={0};
-#ifdef _WIN32
-    if (sscanf_s(req, "%7s %1023s", method, (unsigned)sizeof(method), uri, (unsigned)sizeof(uri)) != 2
-        || strcmp(method,"GET")!=0) {
-#else
-    if (sscanf(req, "%7s %1023s", method, uri) != 2 || strcmp(method,"GET")!=0) {
-#endif
-        const char* m = "HTTP/1.0 405 Method Not Allowed\r\nConnection: close\r\n\r\n";
-        (void)send_all(cs, m, strlen(m));
-        closesock(cs); return;
-    }
-
-    char path[1024];
-    if (build_fs_path(path, sizeof(path), root, uri) != 0) {
-        const char* m = "HTTP/1.0 400 Bad Request\r\nConnection: close\r\n\r\n";
-        (void)send_all(cs, m, strlen(m)); closesock(cs); return;
-    }
-
-    FILE* f = ueng_fopen(path, "rb");
-    if (!f) {
-        const char* m404 = "HTTP/1.0 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n404 Not Found\n";
-        (void)send_all(cs, m404, strlen(m404)); closesock(cs); return;
-    }
-
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); closesock(cs); return; }
-    long sz = ftell(f); if (sz < 0) { fclose(f); closesock(cs); return; }
-    rewind(f);
-
-    char* buf = (char*)malloc((size_t)sz);
-    if (!buf) { fclose(f); closesock(cs); return; }
-    size_t rd = fread(buf, 1, (size_t)sz, f);
-    fclose(f);
-    if (rd != (size_t)sz) { free(buf); closesock(cs); return; }
-
-    char header[512];
-    const char* mime = guess_mime(path);
-    int h = snprintf(header, sizeof(header),
-        "HTTP/1.0 200 OK\r\n"
-        "Content-Type: %s\r\n"
-        "Content-Length: %ld\r\n"
-        "Connection: close\r\n\r\n", mime, sz);
-    if (h < 0 || h >= (int)sizeof(header)) { free(buf); closesock(cs); return; }
-
-    (void)send_all(cs, header, (size_t)h);
-    (void)send_all(cs, buf, (size_t)sz);
-    free(buf);
-    closesock(cs);
 }
 
 /* Generate site/index.html (used by build) */
@@ -847,6 +761,192 @@ static int write_site_index(const char* site_dir,
     (void)snprintf(html, size, tpl, title, title, author, slug, stamp);
     if (write_file(path, html) != 0) { free(html); return -1; }
     free(html);
+    return 0;
+}
+
+/*========================= Self-contained SERVE section =====================*/
+/* Helpers are prefixed serve_* to avoid name collisions. */
+
+static const char* serve_guess_mime(const char* path) {
+    const char *dot = strrchr(path, '.');
+    if (!dot) return "application/octet-stream";
+    if (!strcmp(dot,".html")||!strcmp(dot,".htm")) return "text/html; charset=utf-8";
+    if (!strcmp(dot,".css"))  return "text/css; charset=utf-8";
+    if (!strcmp(dot,".js"))   return "application/javascript";
+    if (!strcmp(dot,".json")) return "application/json";
+    if (!strcmp(dot,".svg"))  return "image/svg+xml";
+    if (!strcmp(dot,".png"))  return "image/png";
+    if (!strcmp(dot,".jpg")||!strcmp(dot,".jpeg")) return "image/jpeg";
+    if (!strcmp(dot,".gif"))  return "image/gif";
+    if (!strcmp(dot,".ico"))  return "image/x-icon";
+    if (!strcmp(dot,".txt")||!strcmp(dot,".md")) return "text/plain; charset=utf-8";
+    return "application/octet-stream";
+}
+
+/* Join root + uri into a safe filesystem path. Reject ".." traversal. */
+static int serve_build_fs_path(char* out, size_t outsz, const char* root, const char* uri) {
+    if (!uri || !*uri) uri = "/";
+    if (strstr(uri, "..")) return -1;                 /* block traversal */
+    size_t ulen = strcspn(uri, "?\r\n");
+    int need_index = (ulen == 1 && uri[0] == '/');
+
+    char rel[512]; size_t j = 0;
+    for (size_t i = 0; i < ulen && j + 1 < sizeof(rel); ++i) {
+        char c = uri[i];
+        if (i==0 && c=='/') continue;                 /* skip leading slash */
+#ifdef _WIN32
+        if (c == '/') c = '\\';
+#endif
+        rel[j++] = c;
+    }
+    rel[j] = '\0';
+    if (need_index) snprintf(rel, sizeof(rel), "index.html");
+
+    int need = snprintf(NULL, 0, "%s%c%s", root, PATH_SEP, rel);
+    if (need < 0 || (size_t)need + 1 > outsz) return -1;
+    snprintf(out, outsz, "%s%c%s", root, PATH_SEP, rel);
+    return 0;
+}
+
+/* Send all bytes (loop until buffer drained) */
+static int serve_send_all(sock_t s, const char* buf, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+#ifdef _WIN32
+        int n = send(s, buf + sent, (int)(len - sent), 0);
+#else
+        int n = (int)send(s, buf + sent, len - sent, 0);
+#endif
+        if (n <= 0) return -1;
+        sent += (size_t)n;
+    }
+    return 0;
+}
+
+/* Handle one HTTP GET request */
+static void serve_handle_client(sock_t cs, const char* root) {
+    char req[2048]; memset(req, 0, sizeof(req));
+#ifdef _WIN32
+    int n = recv(cs, req, (int)sizeof(req)-1, 0);
+#else
+    int n = (int)recv(cs, req, sizeof(req)-1, 0);
+#endif
+    if (n <= 0) { closesock(cs); return; }
+
+    /* Very small parser: expect "GET /path HTTP/1.x" */
+    char method[8]={0}, uri[1024]={0};
+#ifdef _WIN32
+    if (sscanf_s(req, "%7s %1023s", method, (unsigned)sizeof(method), uri, (unsigned)sizeof(uri)) != 2
+        || strcmp(method,"GET")!=0) {
+#else
+    if (sscanf(req, "%7s %1023s", method, uri) != 2 || strcmp(method,"GET")!=0) {
+#endif
+        const char* m = "HTTP/1.0 405 Method Not Allowed\r\nConnection: close\r\n\r\n";
+        (void)serve_send_all(cs, m, strlen(m));
+        closesock(cs); return;
+    }
+
+    char path[1024];
+    if (serve_build_fs_path(path, sizeof(path), root, uri) != 0) {
+        const char* m = "HTTP/1.0 400 Bad Request\r\nConnection: close\r\n\r\n";
+        (void)serve_send_all(cs, m, strlen(m)); closesock(cs); return;
+    }
+
+    FILE* f = ueng_fopen(path, "rb");
+    if (!f) {
+        const char* m404 = "HTTP/1.0 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n404 Not Found\n";
+        (void)serve_send_all(cs, m404, strlen(m404)); closesock(cs); return;
+    }
+
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); closesock(cs); return; }
+    long sz = ftell(f); if (sz < 0) { fclose(f); closesock(cs); return; }
+    rewind(f);
+
+    char* buf = (char*)malloc((size_t)sz);
+    if (!buf) { fclose(f); closesock(cs); return; }
+    size_t rd = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    if (rd != (size_t)sz) { free(buf); closesock(cs); return; }
+
+    char header[512];
+    const char* mime = serve_guess_mime(path);
+    int h = snprintf(header, sizeof(header),
+        "HTTP/1.0 200 OK\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %ld\r\n"
+        "Connection: close\r\n\r\n", mime, sz);
+    if (h < 0 || h >= (int)sizeof(header)) { free(buf); closesock(cs); return; }
+
+    (void)serve_send_all(cs, header, (size_t)h);
+    (void)serve_send_all(cs, buf, (size_t)sz);
+    free(buf);
+    closesock(cs);
+}
+
+/* The serve command: uaengine serve <dir> [port] */
+static int cmd_serve(int argc, char** argv) {
+    if (argc < 3) {
+        puts("Usage: uaengine serve <folder-to-serve> [port]");
+        puts("Example: uaengine serve outputs/my-book/2025-09-14/site 8080");
+        return 1;
+    }
+    const char* root = argv[2];
+    int port = 8080;
+    if (argc >= 4) {
+        long p = strtol(argv[3], NULL, 10);
+        if (p > 0 && p < 65536) port = (int)p;
+    }
+    if (!helper_exists_file(root)) {
+        fprintf(stderr, "[serve] ERROR: folder does not exist: %s\n", root);
+        return 1;
+    }
+
+#ifdef _WIN32
+    WSADATA w; if (WSAStartup(MAKEWORD(2,2), &w) != 0) { fprintf(stderr, "[serve] ERROR: WSAStartup failed\n"); return 1; }
+#endif
+
+    sock_t s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s == SOCK_INVALID) { fprintf(stderr, "[serve] ERROR: socket()\n"); goto cleanup_ws; }
+
+    int opt=1;
+#ifdef _WIN32
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+#else
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#endif
+
+    struct sockaddr_in addr; memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons((unsigned short)port);
+    if (ueng_inet_pton4("127.0.0.1", &addr.sin_addr) != 1) {
+        fprintf(stderr, "[serve] ERROR: inet_pton failed\n");
+        closesock(s); goto cleanup_ws;
+    }
+
+    if (bind(s, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+        fprintf(stderr, "[serve] ERROR: bind() failed (port %d). Is it in use?\n", port);
+        closesock(s); goto cleanup_ws;
+    }
+    if (listen(s, 16) != 0) {
+        fprintf(stderr, "[serve] ERROR: listen() failed\n");
+        closesock(s); goto cleanup_ws;
+    }
+
+    printf("[serve] Serving %s at http://127.0.0.1:%d\n", root, port);
+    printf("[serve] Press Ctrl+C to stop.\n");
+
+    for (;;) {
+        struct sockaddr_in cli; socklen_t clen = (socklen_t)sizeof(cli);
+        sock_t cs = accept(s, (struct sockaddr*)&cli, &clen);
+        if (cs == SOCK_INVALID) continue;
+        serve_handle_client(cs, root);
+    }
+
+    closesock(s);
+cleanup_ws:
+#ifdef _WIN32
+    WSACleanup();
+#endif
     return 0;
 }
 
