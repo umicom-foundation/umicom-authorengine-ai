@@ -15,9 +15,9 @@
  *                 CLEAN target (overwrite), write BUILDINFO.txt,
  *                 auto-generate workspace/toc.md, frontmatter.md,
  *                 acknowledgements.md, cover.svg/frontcover.md,
- *                 and site/index.html (with cover preview if present)
+ *                 and site/index.html (with cover preview copied into site/)
  *     - serve   : tiny static HTTP server.
- *                 NEW: `uaengine serve` (no args) serves today's site output.
+ *                 `uaengine serve` (no args) serves today's site output.
  *
  * DESIGN NOTES
  *   - C-first (C17 baseline), portable; small #ifdefs for Windows/POSIX.
@@ -60,11 +60,11 @@ static int  generate_frontcover_md(const char* title, const char* author, const 
 /*--- Platform-specific includes for directory & sockets --------------------*/
 #ifdef _WIN32
   #define WIN32_LEAN_AND_MEAN
-  #include <direct.h>     /* _mkdir */
-  #include <io.h>         /* _access */
-  #include <winsock2.h>   /* sockets */
-  #include <ws2tcpip.h>   /* InetPtonA */
-  #include <windows.h>    /* FindFirstFileA, DeleteFileA, RemoveDirectoryA, SetFileAttributesA */
+  #include <direct.h>
+  #include <io.h>
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+  #include <windows.h>
   #pragma comment(lib, "ws2_32.lib")
   #define PATH_SEP '\\'
   #define access _access
@@ -369,7 +369,6 @@ static int clean_dir(const char* dir) {
     return rc;
 }
 #else
-#include <sys/stat.h>
 static int clean_dir(const char* dir) {
     if (!helper_exists_file(dir)) return 0;
     DIR* d = opendir(dir);
@@ -961,7 +960,7 @@ static int generate_acknowledgements_md(const char* author) {
     return wr == 0 ? 0 : 1;
 }
 
-/* Simple, fast SVG cover — editable by authors in workspace/cover.svg */
+/* Generate a simple SVG cover in workspace/. */
 static int generate_cover_svg(const char* title, const char* author, const char* slug) {
     (void)mkpath("workspace");
     const char* outpath = "workspace/cover.svg";
@@ -1006,7 +1005,7 @@ static int generate_cover_svg(const char* title, const char* author, const char*
     return wr == 0 ? 0 : 1;
 }
 
-/* A tiny guide that points authors at the editable SVG */
+/* Tiny guide */
 static int generate_frontcover_md(const char* title, const char* author, const char* slug) {
     (void)mkpath("workspace");
     const char* outpath = "workspace/frontcover.md";
@@ -1070,7 +1069,7 @@ static int write_site_index(const char* site_dir,
     if (snprintf(path, sizeof(path), "%s%cindex.html", site_dir, PATH_SEP) < 0) return -1;
 
     const char* cover_block =
-"    <img src=\"../cover/cover.svg\" alt=\"Cover\" style=\"max-width:100%%;height:auto;border:1px solid #ddd;border-radius:12px;margin-top:1rem\"/>\n";
+"    <img src=\"cover.svg\" alt=\"Cover\" style=\"max-width:100%%;height:auto;border:1px solid #ddd;border-radius:12px;margin-top:1rem\"/>\n";
 
     const char* tpl_a =
 "<!doctype html>\n"
@@ -1098,7 +1097,6 @@ static int write_site_index(const char* site_dir,
 "</body>\n"
 "</html>\n";
 
-    /* build full HTML in memory */
     size_t est = strlen(tpl_a) + strlen(title)*2 + strlen(author) + strlen(slug) + strlen(stamp)
                + strlen(tpl_b) + (has_cover ? strlen(cover_block) : 0) + 256;
     char* html = (char*)malloc(est);
@@ -1182,16 +1180,34 @@ static int cmd_build(void) {
         if (mkpath(p)!=0) fprintf(stderr,"[build] WARN: cannot create %s\n",p);
     }
 
-    /* 6) Cover: generate in workspace, then copy to outputs/.../cover/cover.svg */
-    (void)generate_cover_svg(title, author, slug);
+    /* 6) Cover: generate or pick user one; copy to cover/ and also into site/ */
+    /* Prefer user-provided cover in workspace/cover.svg; if not present, generate it. */
+    char ws_cover[640]; snprintf(ws_cover, sizeof(ws_cover), "workspace%ccover.svg", PATH_SEP);
+    if (!helper_exists_file(ws_cover)) {
+        /* Some users may have dropped it under chapters by mistake; accept that too. */
+        char ws_chap_cover[640]; snprintf(ws_chap_cover, sizeof(ws_chap_cover), "workspace%cchapters%ccover.svg", PATH_SEP, PATH_SEP);
+        if (helper_exists_file(ws_chap_cover)) {
+            (void)copy_file_binary(ws_chap_cover, ws_cover);
+        } else {
+            (void)generate_cover_svg(title, author, slug);
+        }
+    }
     (void)generate_frontcover_md(title, author, slug);
-    char cover_src[640]; snprintf(cover_src, sizeof(cover_src), "workspace%ccover.svg", PATH_SEP);
-    char cover_dst[640]; snprintf(cover_dst, sizeof(cover_dst), "%s%ccover%ccover.svg", root, PATH_SEP, PATH_SEP);
+
     int has_cover = 0;
-    if (helper_exists_file(cover_src)) {
-        if (copy_file_binary(cover_src, cover_dst) == 0) {
-            has_cover = helper_exists_file(cover_dst);
-            if (has_cover) printf("[cover] copied: %s\n", cover_dst);
+    char cover_dst_archive[640]; snprintf(cover_dst_archive, sizeof(cover_dst_archive), "%s%ccover%ccover.svg", root, PATH_SEP, PATH_SEP);
+    char cover_dst_site[640];    snprintf(cover_dst_site,    sizeof(cover_dst_site),    "%s%csite%ccover.svg",  root, PATH_SEP, PATH_SEP);
+    if (helper_exists_file(ws_cover)) {
+        if (copy_file_binary(ws_cover, cover_dst_archive) == 0) {
+            has_cover = helper_exists_file(cover_dst_archive);
+            if (has_cover) printf("[cover] copied (archive): %s\n", cover_dst_archive);
+        }
+        /* copy also into site root so the server can serve it without .. */
+        if (copy_file_binary(ws_cover, cover_dst_site) == 0) {
+            if (helper_exists_file(cover_dst_site)) {
+                printf("[cover] copied (site): %s\n", cover_dst_site);
+                has_cover = 1;
+            }
         }
     }
 
@@ -1204,7 +1220,7 @@ static int cmd_build(void) {
     if (n<0 || n>=(int)sizeof(info)) fprintf(stderr,"[build] WARN: info truncated\n");
     if (write_file(info_path, info)!=0) { fprintf(stderr,"[build] ERROR: cannot write BUILDINFO.txt\n"); return 1; }
 
-    /* 8) Auto-generate site/index.html (now aware of cover) */
+    /* 8) Auto-generate site/index.html (now references cover.svg in site/) */
     char site_dir[640]; snprintf(site_dir,sizeof(site_dir),"%s%c%s",root,PATH_SEP,"site");
     if (write_site_index(site_dir, title, author, slug, stamp, has_cover) != 0) {
         fprintf(stderr,"[build] WARN: could not write site/index.html\n");
@@ -1342,7 +1358,6 @@ static int cmd_serve(int argc, char** argv) {
     if (argc == 2) {
         auto_mode = 1;
     } else if (argc == 3) {
-        /* Could be a port or a folder; detect: if all digits -> port; else -> folder */
         int alldigit = 1;
         for (const char* p = argv[2]; *p; ++p) if (!isdigit((unsigned char)*p)) { alldigit = 0; break; }
         if (alldigit) { port = (int)strtol(argv[2], NULL, 10); auto_mode = 1; }
@@ -1360,21 +1375,14 @@ static int cmd_serve(int argc, char** argv) {
         if (tiny_yaml_get("book.yaml","title", title,sizeof(title)) != 0) snprintf(title,sizeof(title),"%s","Untitled");
         slugify(title, slug, sizeof(slug));
         build_date_utc(day, sizeof(day));
-        snprintf(auto_root, sizeof(auto_root), "outputs%c%s%c%s%ccurrent%s", PATH_SEP, slug, PATH_SEP, day, PATH_SEP, "");
-        /* Prefer today's dated folder; if that exact folder is missing, try legacy date-only path without /current */
-        if (!helper_exists_file(auto_root)) {
-            snprintf(auto_root, sizeof(auto_root), "outputs%c%s%c%s%csite", PATH_SEP, slug, PATH_SEP, day, PATH_SEP);
-        } else {
-            /* if 'current' exists, serve its 'site' */
-            snprintf(auto_root, sizeof(auto_root), "outputs%c%s%c%s%csite", PATH_SEP, slug, PATH_SEP, day, PATH_SEP);
-        }
+        snprintf(auto_root, sizeof(auto_root), "outputs%c%s%c%s%csite", PATH_SEP, slug, PATH_SEP, day, PATH_SEP);
         root = auto_root;
     }
 
     if (!root) {
         puts("Usage: uaengine serve [folder-to-serve] [port]");
         puts("       uaengine serve              # auto: today's outputs/<slug>/<YYYY-MM-DD>/site");
-        puts("       uaengine serve 8080         # auto + custom port");
+        puts("       uaengine serve 8081         # auto + custom port");
         return 1;
     }
     if (!helper_exists_file(root)) {
