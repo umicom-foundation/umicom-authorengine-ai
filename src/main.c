@@ -10,9 +10,10 @@
  *     - init    : prepare workspace + starter book.yaml
  *     - ingest  : scan dropzone recursively for .md/.markdown/.txt/.pdf and
  *                 draft workspace/outline.md (relative file list)
- *     - build   : read book.yaml, optionally ingest first, derive a slug,
- *                 create *date-based* outputs, CLEAN target (overwrite),
- *                 write BUILDINFO.txt and auto-generate site/index.html
+ *     - build   : read book.yaml, optionally ingest first, normalize chapters
+ *                 into workspace/chapters/, create *date-based* outputs,
+ *                 CLEAN target (overwrite), write BUILDINFO.txt,
+ *                 auto-generate site/index.html
  *     - serve   : tiny static HTTP server to preview any folder (default: site/)
  *
  * DESIGN NOTES
@@ -223,7 +224,8 @@ static int seed_book_yaml(void) {
         "  total_lessons: 12\n"
         "site:\n"
         "  enabled: true\n"
-        "ingest_on_build: true\n";
+        "ingest_on_build: true\n"
+        "normalize_chapters_on_build: true\n";
     return write_text_file_if_absent("book.yaml", yaml);
 }
 
@@ -433,7 +435,6 @@ static int ci_cmp(const char* a, const char* b) {
         a++; b++;
     }
 }
-/* qsort adapter */
 static int qsort_ci_cmp(const void* A, const void* B) {
     const char* a = *(const char* const*)A;
     const char* b = *(const char* const*)B;
@@ -454,8 +455,15 @@ static void rel_normalize(char* s) {
     (void)s;
 #endif
 }
+static void rel_to_native_sep(char* s) {
+#ifdef _WIN32
+    for (char* p = s; *p; ++p) if (*p == '/') *p = '\\';
+#else
+    (void)s;
+#endif
+}
 
-/* Recursive directory walk: collect files with wanted extensions into StrList */
+/* Recursive directory walk: collect desired files */
 #ifdef _WIN32
 static int ingest_walk(const char* abs_dir, const char* rel_dir, StrList* out) {
     int patn = snprintf(NULL, 0, "%s\\*", abs_dir);
@@ -473,13 +481,11 @@ static int ingest_walk(const char* abs_dir, const char* rel_dir, StrList* out) {
         const char* name = ffd.cFileName;
         if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
 
-        /* Build absolute child path */
         int need_abs = snprintf(NULL, 0, "%s\\%s", abs_dir, name);
         char* child_abs = (char*)malloc((size_t)need_abs + 1);
         if (!child_abs) { rc = -1; break; }
         snprintf(child_abs, (size_t)need_abs + 1, "%s\\%s", abs_dir, name);
 
-        /* Build relative child path (for listing) */
         int need_rel = rel_dir ? snprintf(NULL, 0, "%s/%s", rel_dir, name)
                                : (int)strlen(name);
         char* child_rel = (char*)malloc((size_t)need_rel + 1);
@@ -490,7 +496,6 @@ static int ingest_walk(const char* abs_dir, const char* rel_dir, StrList* out) {
         if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             rc = ingest_walk(child_abs, child_rel, out);
         } else {
-            /* Keep only wanted extensions */
             if (endswith_ic(child_rel, ".md") || endswith_ic(child_rel, ".markdown") ||
                 endswith_ic(child_rel, ".txt") || endswith_ic(child_rel, ".pdf")) {
                 rel_normalize(child_rel);
@@ -551,11 +556,10 @@ static int ingest_walk(const char* abs_dir, const char* rel_dir, StrList* out) {
 }
 #endif
 
-/* Write workspace/outline.md including Title/Author/Date and the file list */
+/* Write workspace/outline.md */
 static int write_outline_md(const char* title, const char* author,
                             const char* dropzone_rel, const StrList* files) {
     (void)mkpath("workspace");
-
     char path[512];
     snprintf(path, sizeof(path), "workspace%coutline.md", PATH_SEP);
 
@@ -584,7 +588,7 @@ static int write_outline_md(const char* title, const char* author,
             n = snprintf(buf + used, est - used, "- %s\n", files->items[i]);
             if (n < 0) { free(buf); return -1; }
             used += (size_t)n;
-            if (used + 256 > est) { /* grow buffer if needed (rare) */
+            if (used + 256 > est) {
                 est *= 2;
                 char* tmp = (char*)realloc(buf, est);
                 if (!tmp) { free(buf); return -1; }
@@ -605,7 +609,7 @@ static int write_outline_md(const char* title, const char* author,
     return rc;
 }
 
-/* The `ingest` command (lists .md/.markdown/.txt/.pdf) */
+/* The `ingest` command */
 static int cmd_ingest(void) {
     char title[256]={0}, author[256]={0}, drop[256]={0};
     if (tiny_yaml_get("book.yaml","title", title,sizeof(title))  != 0) snprintf(title, sizeof(title),  "%s","Untitled");
@@ -632,6 +636,84 @@ static int cmd_ingest(void) {
     return 0;
 }
 
+/*======================== Chapter normalization (build) =====================*/
+
+static int ensure_parent_dir(const char* filepath) {
+    const char* last_sep = NULL;
+    for (const char* p = filepath; *p; ++p) {
+        if (*p == PATH_SEP) last_sep = p;
+    }
+    if (!last_sep) return 0;
+    size_t n = (size_t)(last_sep - filepath);
+    char* dir = (char*)malloc(n + 1);
+    if (!dir) return -1;
+    memcpy(dir, filepath, n);
+    dir[n] = '\0';
+    int rc = mkpath(dir);
+    free(dir);
+    return rc;
+}
+static int copy_file_binary(const char* src, const char* dst) {
+    FILE* in = ueng_fopen(src, "rb");
+    if (!in) { fprintf(stderr, "[copy] open src fail: %s\n", src); return -1; }
+    if (ensure_parent_dir(dst) != 0) { fclose(in); fprintf(stderr,"[copy] mkpath fail for %s\n", dst); return -1; }
+    FILE* out = ueng_fopen(dst, "wb");
+    if (!out) { fclose(in); fprintf(stderr, "[copy] open dst fail: %s\n", dst); return -1; }
+
+    char buf[64*1024];
+    size_t rd;
+    while ((rd = fread(buf, 1, sizeof(buf), in)) > 0) {
+        size_t wr = fwrite(buf, 1, rd, out);
+        if (wr != rd) { fclose(in); fclose(out); fprintf(stderr, "[copy] short write: %s\n", dst); return -1; }
+    }
+    fclose(in);
+    fclose(out);
+    return 0;
+}
+static int normalize_chapters(const char* dropzone) {
+    StrList files; sl_init(&files);
+    char abs[1024]; snprintf(abs, sizeof(abs), "%s", dropzone);
+    int rc = ingest_walk(abs, NULL, &files);
+    if (rc != 0) { fprintf(stderr, "[normalize] walk failed\n"); sl_free(&files); return 1; }
+
+    if (mkpath("workspace") != 0) fprintf(stderr,"[normalize] WARN: workspace create\n");
+    if (helper_exists_file("workspace/chapters")) {
+        (void)clean_dir("workspace/chapters");
+    } else {
+        (void)mkpath("workspace/chapters");
+    }
+
+    size_t copied = 0, skipped = 0;
+    for (size_t i=0; i<files.count; ++i) {
+        const char* rel = files.items[i];
+        if (!(endswith_ic(rel,".md") || endswith_ic(rel,".markdown") || endswith_ic(rel,".txt"))) {
+            skipped++; continue;
+        }
+
+        char rel_native[1024]; snprintf(rel_native, sizeof(rel_native), "%s", rel);
+        rel_to_native_sep(rel_native);
+
+        char src[1200];
+        snprintf(src, sizeof(src), "%s%c%s", dropzone, PATH_SEP, rel_native);
+
+        char dst[1200];
+        snprintf(dst, sizeof(dst), "workspace%cchapters%c%s", PATH_SEP, PATH_SEP, rel_native);
+
+        if (copy_file_binary(src, dst) == 0) copied++;
+        else fprintf(stderr,"[normalize] copy failed: %s -> %s\n", src, dst);
+    }
+
+    const char* mani = "workspace/chapters/_manifest.txt";
+    char line[256];
+    int n = snprintf(line, sizeof(line), "copied=%u skipped=%u\n", (unsigned)copied, (unsigned)skipped);
+    if (n > 0) (void)write_file(mani, line);
+
+    printf("[normalize] chapters: copied %u, skipped %u\n", (unsigned)copied, (unsigned)skipped);
+
+    sl_free(&files);
+    return 0;
+}
+
 /*=============================== INIT ======================================*/
 static int cmd_init(void) {
     const char *dirs[] = {
@@ -647,80 +729,6 @@ static int cmd_init(void) {
 }
 
 /*=============================== BUILD =====================================*/
-static int write_site_index(const char* site_dir,
-                            const char* title,
-                            const char* author,
-                            const char* slug,
-                            const char* stamp);
-
-/* Build: optional auto-ingest; date-based outputs; clean; index page */
-static int cmd_build(void) {
-    /* 1) Load metadata from book.yaml */
-    char title[256]={0}, author[256]={0}; int rc;
-    rc = tiny_yaml_get("book.yaml","title", title,sizeof(title));
-    if (rc == -1) { fprintf(stderr,"[build] ERROR: cannot open book.yaml (run `uaengine init`)\n"); return 1; }
-    if (rc ==  1) { snprintf(title,sizeof(title),"%s","Untitled"); }
-    rc = tiny_yaml_get("book.yaml","author",author,sizeof(author));
-    if (rc == -1) { fprintf(stderr,"[build] ERROR: cannot open book.yaml\n"); return 1; }
-    if (rc ==  1) { snprintf(author,sizeof(author),"%s","Unknown"); }
-
-    /* 2) Optionally run the ingestor first */
-    int ingest_first = 0;
-    if (tiny_yaml_get_bool("book.yaml", "ingest_on_build", &ingest_first) == 0 && ingest_first) {
-        puts("[build] ingest_on_build: true — running ingest...");
-        if (cmd_ingest() != 0) {
-            fprintf(stderr, "[build] WARN: ingest failed; continuing build.\n");
-        }
-    }
-
-    /* 3) Compute slug, date (for folder), and full timestamp (for info) */
-    char slug[256]; slugify(title, slug, sizeof(slug));
-    char day[32];   build_date_utc(day, sizeof(day));
-    char stamp[64]; build_timestamp_utc(stamp, sizeof(stamp));
-
-    /* 4) Root is date-only: outputs/<slug>/<YYYY-MM-DD> (overwrite behavior) */
-    char root[512];
-    snprintf(root,sizeof(root),"outputs%c%s%c%s",PATH_SEP,slug,PATH_SEP,day);
-
-    if (helper_exists_file(root)) {
-        printf("[build] cleaning existing: %s\n", root);
-        if (clean_dir(root) != 0) {
-            fprintf(stderr,"[build] WARN: could not fully clean %s (some files may remain)\n", root);
-        }
-    } else {
-        if (mkpath(root) != 0) { fprintf(stderr,"[build] ERROR: cannot create %s\n", root); return 1; }
-    }
-    (void)mkpath(root);
-
-    /* 5) Create standard subdirs */
-    const char *sub[] = {"pdf","docx","epub","html","md","cover","video-scripts","site",NULL};
-    for (int i=0; sub[i]!=NULL; ++i) {
-        char p[640];
-        snprintf(p,sizeof(p),"%s%c%s",root,PATH_SEP,sub[i]);
-        if (mkpath(p)!=0) fprintf(stderr,"[build] WARN: cannot create %s\n",p);
-    }
-
-    /* 6) Write BUILDINFO.txt */
-    char info_path[640]; snprintf(info_path,sizeof(info_path),"%s%cBUILDINFO.txt",root,PATH_SEP);
-    char info[1024];
-    int n = snprintf(info,sizeof(info),
-        "Title:  %s\nAuthor: %s\nSlug:   %s\nDate:   %s\nStamp:  %s\n",
-        title,author,slug,day,stamp);
-    if (n<0 || n>=(int)sizeof(info)) fprintf(stderr,"[build] WARN: info truncated\n");
-    if (write_file(info_path, info)!=0) { fprintf(stderr,"[build] ERROR: cannot write BUILDINFO.txt\n"); return 1; }
-
-    /* 7) Auto-generate site/index.html */
-    char site_dir[640]; snprintf(site_dir,sizeof(site_dir),"%s%c%s",root,PATH_SEP,"site");
-    if (write_site_index(site_dir, title, author, slug, stamp) != 0) {
-        fprintf(stderr,"[build] WARN: could not write site/index.html\n");
-    }
-
-    printf("[build] ok: %s\n", root);
-    puts("[build] outputs will be overwritten on subsequent builds for the same date.");
-    return 0;
-}
-
-/* Generate site/index.html (used by build) */
 static int write_site_index(const char* site_dir,
                             const char* title,
                             const char* author,
@@ -764,9 +772,86 @@ static int write_site_index(const char* site_dir,
     return 0;
 }
 
-/*========================= Self-contained SERVE section =====================*/
-/* Helpers are prefixed serve_* to avoid name collisions. */
+static int cmd_build(void) {
+    /* 1) Load metadata from book.yaml */
+    char title[256]={0}, author[256]={0}; int rc;
+    rc = tiny_yaml_get("book.yaml","title", title,sizeof(title));
+    if (rc == -1) { fprintf(stderr,"[build] ERROR: cannot open book.yaml (run `uaengine init`)\n"); return 1; }
+    if (rc ==  1) { snprintf(title,sizeof(title),"%s","Untitled"); }
+    rc = tiny_yaml_get("book.yaml","author",author,sizeof(author));
+    if (rc == -1) { fprintf(stderr,"[build] ERROR: cannot open book.yaml\n"); return 1; }
+    if (rc ==  1) { snprintf(author,sizeof(author),"%s","Unknown"); }
 
+    /* 2) Optionally run the ingestor first */
+    int ingest_first = 0;
+    if (tiny_yaml_get_bool("book.yaml", "ingest_on_build", &ingest_first) == 0 && ingest_first) {
+        puts("[build] ingest_on_build: true — running ingest...");
+        if (cmd_ingest() != 0) {
+            fprintf(stderr, "[build] WARN: ingest failed; continuing build.\n");
+        }
+    }
+
+    /* 3) Optionally normalize chapters into workspace/chapters */
+    int norm = 0;
+    char drop[256]={0};
+    if (tiny_yaml_get("book.yaml","dropzone",drop,sizeof(drop)) != 0) snprintf(drop,sizeof(drop),"%s","dropzone");
+    if (tiny_yaml_get_bool("book.yaml","normalize_chapters_on_build",&norm) == 0 && norm) {
+        printf("[build] normalize_chapters_on_build: true — mirroring from %s\n", drop);
+        if (normalize_chapters(drop) != 0) {
+            fprintf(stderr,"[build] WARN: chapter normalization failed; continuing.\n");
+        }
+    }
+
+    /* 4) Compute slug, date (for folder), and full timestamp (for info) */
+    char slug[256]; slugify(title, slug, sizeof(slug));
+    char day[32];   build_date_utc(day, sizeof(day));
+    char stamp[64]; build_timestamp_utc(stamp, sizeof(stamp));
+
+    /* 5) Root is date-only: outputs/<slug>/<YYYY-MM-DD> */
+    char root[512];
+    snprintf(root,sizeof(root),"outputs%c%s%c%s",PATH_SEP,slug,PATH_SEP,day);
+
+    if (helper_exists_file(root)) {
+        printf("[build] cleaning existing: %s\n", root);
+        if (clean_dir(root) != 0) {
+            fprintf(stderr,"[build] WARN: could not fully clean %s (some files may remain)\n", root);
+        }
+    } else {
+        if (mkpath(root) != 0) { fprintf(stderr,"[build] ERROR: cannot create %s\n", root); return 1; }
+    }
+    (void)mkpath(root);
+
+    /* 6) Create standard subdirs */
+    const char *sub[] = {"pdf","docx","epub","html","md","cover","video-scripts","site",NULL};
+    for (int i=0; sub[i]!=NULL; ++i) {
+        char p[640];
+        snprintf(p,sizeof(p),"%s%c%s",root,PATH_SEP,sub[i]);
+        if (mkpath(p)!=0) fprintf(stderr,"[build] WARN: cannot create %s\n",p);
+    }
+
+    /* 7) Write BUILDINFO.txt */
+    char info_path[640]; snprintf(info_path,sizeof(info_path),"%s%cBUILDINFO.txt",root,PATH_SEP);
+    char info[1024];
+    int n = snprintf(info,sizeof(info),
+        "Title:  %s\nAuthor: %s\nSlug:   %s\nDate:   %s\nStamp:  %s\n",
+        title,author,slug,day,stamp);
+    if (n<0 || n>=(int)sizeof(info)) fprintf(stderr,"[build] WARN: info truncated\n");
+    if (write_file(info_path, info)!=0) { fprintf(stderr,"[build] ERROR: cannot write BUILDINFO.txt\n"); return 1; }
+
+    /* 8) Auto-generate site/index.html */
+    char site_dir[640]; snprintf(site_dir,sizeof(site_dir),"%s%c%s",root,PATH_SEP,"site");
+    if (write_site_index(site_dir, title, author, slug, stamp) != 0) {
+        fprintf(stderr,"[build] WARN: could not write site/index.html\n");
+    }
+
+    printf("[build] ok: %s\n", root);
+    puts("[build] outputs will be overwritten on subsequent builds for the same date.");
+    return 0;
+}
+
+/*============================== SERVE ======================================*/
+
+/* MIME type guess for static files */
 static const char* serve_guess_mime(const char* path) {
     const char *dot = strrchr(path, '.');
     if (!dot) return "application/octet-stream";
@@ -783,17 +868,17 @@ static const char* serve_guess_mime(const char* path) {
     return "application/octet-stream";
 }
 
-/* Join root + uri into a safe filesystem path. Reject ".." traversal. */
+/* Safe path join: root + uri -> out; blocks ".." */
 static int serve_build_fs_path(char* out, size_t outsz, const char* root, const char* uri) {
     if (!uri || !*uri) uri = "/";
-    if (strstr(uri, "..")) return -1;                 /* block traversal */
+    if (strstr(uri, "..")) return -1;
     size_t ulen = strcspn(uri, "?\r\n");
     int need_index = (ulen == 1 && uri[0] == '/');
 
     char rel[512]; size_t j = 0;
     for (size_t i = 0; i < ulen && j + 1 < sizeof(rel); ++i) {
         char c = uri[i];
-        if (i==0 && c=='/') continue;                 /* skip leading slash */
+        if (i==0 && c=='/') continue;
 #ifdef _WIN32
         if (c == '/') c = '\\';
 #endif
@@ -808,7 +893,7 @@ static int serve_build_fs_path(char* out, size_t outsz, const char* root, const 
     return 0;
 }
 
-/* Send all bytes (loop until buffer drained) */
+/* Send all bytes */
 static int serve_send_all(sock_t s, const char* buf, size_t len) {
     size_t sent = 0;
     while (sent < len) {
@@ -833,7 +918,6 @@ static void serve_handle_client(sock_t cs, const char* root) {
 #endif
     if (n <= 0) { closesock(cs); return; }
 
-    /* Very small parser: expect "GET /path HTTP/1.x" */
     char method[8]={0}, uri[1024]={0};
 #ifdef _WIN32
     if (sscanf_s(req, "%7s %1023s", method, (unsigned)sizeof(method), uri, (unsigned)sizeof(uri)) != 2
@@ -950,7 +1034,7 @@ cleanup_ws:
     return 0;
 }
 
-/*--------------------------- usage & dispatch -------------------------------*/
+/*=========================== usage & dispatch ===============================*/
 static void usage(void) {
     printf("uaengine %s\n", UENG_VERSION);
     printf("Usage: uaengine <init|ingest|build|serve|publish|--version>\n");
