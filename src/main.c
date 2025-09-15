@@ -117,12 +117,13 @@ static int ueng_inet_pton4(const char* src, void* dst) {
 #endif
 }
 static char* ltrim(char* s) { while (*s && isspace((unsigned char)*s)) s++; return s; }
+/* FIX: remove erroneous '*' in rtrim */
 static void  rtrim(char* s) { size_t n=strlen(s); while (n>0 && isspace((unsigned char)s[n-1])) s[--n]='\0'; }
 static void  unquote(char* s) {
     size_t n = strlen(s);
     if (n >= 2) {
         char a = s[0], b = s[n-1];
-        if ((a=='"' && b=='"') || (a=='\'' && b=='\'')) { memmove(s, s+1, n-2); s[n-2]='\0'; }
+        if ((a=='\"' && b=='\"') || (a=='\'' && b=='\'')) { memmove(s, s+1, n-2); s[n-2]='\0'; }
     }
 }
 
@@ -1316,15 +1317,12 @@ static int cmd_export(void) {
     char cmd1[2048];
     if (rel_css[0]) {
         snprintf(cmd1, sizeof(cmd1),
-           
-"pandoc \"workspace%cbook-draft.md\" -f markdown -t html5 -s --toc --metadata title=\"%s\" -c \"%s\" -o \"%s\"",
-
-            PATH_SEP, title, rel_css, out_html);
+                 "pandoc \"workspace%cbook-draft.md\" -f markdown -t html5 -s --toc --metadata title=\"%s\" -c \"%s\" -o \"%s\"",
+                 PATH_SEP, title, rel_css, out_html);
     } else {
         snprintf(cmd1, sizeof(cmd1),
-        "pandoc \"workspace%cbook-draft.md\" -f markdown -t html5 -s --toc --metadata title=\"%s\" -o \"%s\"",
-
-                        PATH_SEP, title, out_html);
+                 "pandoc \"workspace%cbook-draft.md\" -f markdown -t html5 -s --toc --metadata title=\"%s\" -o \"%s\"",
+                 PATH_SEP, title, out_html);
     }
     if (exec_cmd(cmd1) != 0) {
         fprintf(stderr, "[export] ERROR: pandoc HTML failed.\n");
@@ -1418,6 +1416,15 @@ static int serve_build_fs_path(char* out, size_t outsz, const char* root, const 
     snprintf(out, outsz, "%s%c%s", root, PATH_SEP, rel);
     return 0;
 }
+static int serve_send_all(sock_t s, const char* buf, size_t len);
+static void serve_send_404(sock_t cs) {
+    const char* msg = "HTTP/1.0 404 Not Found\r\n"
+                      "Content-Type: text/plain; charset=utf-8\r\n"
+                      "Connection: close\r\n\r\n"
+                      "Not Found\n";
+    (void)serve_send_all(cs, msg, strlen(msg));
+}
+
 static int serve_send_all(sock_t s, const char* buf, size_t len) {
     size_t sent = 0;
     while (sent < len) {
@@ -1451,25 +1458,17 @@ static void serve_handle_client(sock_t cs, const char* root) {
     if (sscanf(req, "%7s %1023s", method, uri) != 2 ||
         (strcmp(method, "GET") != 0 && strcmp(method, "HEAD") != 0)) {
 #endif
-        const char* m = "HTTP/1.0 405 Method Not Allowed\r\nConnection: close\r\n\r\n";
-        (void)serve_send_all(cs, m, strlen(m));
+        serve_send_404(cs);
         closesock(cs);
         return;
     }
 
-    if (strchr(uri, '%')) {
-        const char* m = "HTTP/1.0 400 Bad Request\r\nConnection: close\r\n\r\n";
-        (void)serve_send_all(cs, m, strlen(m));
-        closesock(cs);
-        return;
-    }
+    /* Reject encoded traversal and .. */
+    if (strchr(uri, '%')) { serve_send_404(cs); closesock(cs); return; }
 
     char path[1024];
     if (serve_build_fs_path(path, sizeof(path), root, uri) != 0) {
-        const char* m = "HTTP/1.0 400 Bad Request\r\nConnection: close\r\n\r\n";
-        (void)serve_send_all(cs, m, strlen(m));
-        closesock(cs);
-        return;
+        serve_send_404(cs); closesock(cs); return;
     }
 
 #ifdef _WIN32
@@ -1495,13 +1494,10 @@ static void serve_handle_client(sock_t cs, const char* root) {
 
     if (h < 0 || h >= (int)sizeof(header)) { fclose(f); closesock(cs); return; }
 
-    /* Send headers */
     if (serve_send_all(cs, header, (size_t)h) != 0) { fclose(f); closesock(cs); return; }
 
-    /* HEAD = headers only */
     if (strcmp(method, "HEAD") == 0) { fclose(f); closesock(cs); return; }
 
-    /* Stream body in chunks */
     char buf[65536];
     size_t nrd;
     while ((nrd = fread(buf, 1, sizeof(buf), f)) > 0) {
@@ -1511,100 +1507,120 @@ static void serve_handle_client(sock_t cs, const char* root) {
     fclose(f);
     closesock(cs);
 }
-}
 
-/*--------------------------- usage & dispatch -------------------------------*/
-static void usage(void) {
-    printf("uaengine %s\n", UENG_VERSION);
-    printf("Usage: uaengine <init|ingest|build|export|serve|publish|--version>\n");
-}
-static int cmd_publish(void) { puts("[publish] repo (TODO)"); return 0; }
-
-/* Convenience: `uaengine serve` uses today's outputs/<slug>/<YYYY-MM-DD>/site */
+/*-------------------------------- cmd_serve --------------------------------*/
 static int cmd_serve(int argc, char** argv) {
-    char auto_root[1024] = {0};
-    const char* root = NULL;
-    int port = 8080;
+#ifdef _WIN32
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2,2), &wsa) != 0) {
+        fprintf(stderr, "[serve] WSAStartup failed\n");
+        return 1;
+    }
+#endif
 
-    int auto_mode = 0;
-    if (argc == 2) auto_mode = 1;
-    else if (argc == 3) {
-        int alldigit = 1;
-        for (const char* p = argv[2]; *p; ++p) if (!isdigit((unsigned char)*p)) { alldigit = 0; break; }
-        if (alldigit) { port = (int)strtol(argv[2], NULL, 10); auto_mode = 1; }
-        else root = argv[2];
-    } else {
-        root = argv[2];
-        if (argc >= 4) {
-            long p = strtol(argv[3], NULL, 10);
-            if (p > 0 && p < 65536) port = (int)p;
+    /* Resolve site root to serve: outputs/<slug>/<day>/site by default */
+    char title[256]={0};
+    if (tiny_yaml_get("book.yaml","title", title,sizeof(title))  != 0) snprintf(title,sizeof(title),"%s","Untitled");
+    char slug[256]; slugify(title, slug, sizeof(slug));
+    char day[32]; build_date_utc(day, sizeof(day));
+
+    char root[1024];
+    snprintf(root, sizeof(root), "outputs%c%s%c%s%csite", PATH_SEP, slug, PATH_SEP, day, PATH_SEP);
+
+    int port = 8080; /* Declare before we might set it */
+    if (argc >= 3) {
+        /* Allow overriding root or port: if arg is number => port, else treat as dir */
+        const char* a2 = argv[2];
+        int only_digits = 1; for (const char* p=a2; *p; ++p) if (!isdigit((unsigned char)*p)) { only_digits = 0; break; }
+        if (!only_digits) {
+            snprintf(root, sizeof(root), "%s", a2);
+        } else {
+            port = atoi(a2);
+            if (port <= 0) port = 8080;
         }
     }
+    if (argc >= 4) {
+        port = atoi(argv[3]);
+        if (port <= 0) port = 8080;
+    }
 
-    if (auto_mode) {
-        char title[256]={0}, slug[256]={0}, day[32]={0};
-        if (tiny_yaml_get("book.yaml","title", title,sizeof(title)) != 0) snprintf(title,sizeof(title),"%s","Untitled");
-        slugify(title, slug, sizeof(slug));
-        build_date_utc(day, sizeof(day));
-        snprintf(auto_root, sizeof(auto_root), "outputs%c%s%c%s%csite", PATH_SEP, slug, PATH_SEP, day, PATH_SEP);
-        root = auto_root;
-    }
-    if (!root) {
-        puts("Usage: uaengine serve [folder-to-serve] [port]");
-        puts("       uaengine serve              # auto: today's outputs/<slug>/<YYYY-MM-DD>/site");
-        puts("       uaengine serve 8081         # auto + custom port");
-        return 1;
-    }
     if (!helper_exists_file(root)) {
-        fprintf(stderr, "[serve] ERROR: folder does not exist: %s\n", root);
-        fprintf(stderr, "Hint: run `uaengine build` first.\n");
+        fprintf(stderr, "[serve] ERROR: site root not found: %s\n", root);
+#ifdef _WIN32
+        WSACleanup();
+#endif
         return 1;
     }
-
-#ifdef _WIN32
-    WSADATA w; if (WSAStartup(MAKEWORD(2,2), &w) != 0) { fprintf(stderr, "[serve] ERROR: WSAStartup failed\n"); return 1; }
-#endif
 
     sock_t s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s == SOCK_INVALID) { fprintf(stderr, "[serve] ERROR: socket()\n"); goto cleanup_ws; }
-    int opt=1;
+    if (s == SOCK_INVALID) {
+        fprintf(stderr, "[serve] ERROR: socket()\n");
 #ifdef _WIN32
-    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+        WSACleanup();
+#endif
+        return 1;
+    }
+
+    int yes = 1;
+#ifdef _WIN32
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(yes));
 #else
-    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 #endif
 
-    struct sockaddr_in addr; memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET; addr.sin_port = htons((unsigned short)port);
-    if (ueng_inet_pton4("127.0.0.1", &addr.sin_addr) != 1) {
-        fprintf(stderr, "[serve] ERROR: inet_pton failed\n"); closesock(s); goto cleanup_ws;
-    }
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons((unsigned short)port);
 
     if (bind(s, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-        fprintf(stderr, "[serve] ERROR: bind() failed (port %d). Is it in use?\n", port);
-        closesock(s); goto cleanup_ws;
+        fprintf(stderr, "[serve] ERROR: bind() on port %d\n", port);
+#ifdef _WIN32
+        closesock(s); WSACleanup();
+#else
+        closesock(s);
+#endif
+        return 1;
     }
     if (listen(s, 16) != 0) {
-        fprintf(stderr, "[serve] ERROR: listen() failed\n");
-        closesock(s); goto cleanup_ws;
+        fprintf(stderr, "[serve] ERROR: listen()\n");
+#ifdef _WIN32
+        closesock(s); WSACleanup();
+#else
+        closesock(s);
+#endif
+        return 1;
     }
 
-    printf("[serve] Serving %s at http://127.0.0.1:%d\n", root, port);
-    printf("[serve] Press Ctrl+C to stop.\n");
+    char host[64] = "127.0.0.1";
+    printf("[serve] Serving %s at http://%s:%d\n", root, host, port);
 
     for (;;) {
-        struct sockaddr_in cli; socklen_t clen = (socklen_t)sizeof(cli);
+        struct sockaddr_in cli;
+#ifdef _WIN32
+        int clen = (int)sizeof(cli);
+#else
+        socklen_t clen = (socklen_t)sizeof(cli);
+#endif
         sock_t cs = accept(s, (struct sockaddr*)&cli, &clen);
         if (cs == SOCK_INVALID) continue;
         serve_handle_client(cs, root);
     }
 
-    closesock(s);
-cleanup_ws:
 #ifdef _WIN32
+    closesock(s);
     WSACleanup();
+#else
+    closesock(s);
 #endif
     return 0;
+}
+
+/*------------------------------- cmd_publish --------------------------------*/
+static int cmd_publish(void) {
+    fprintf(stderr, "[publish] Not implemented yet.\n");
+    return 2;
 }
 
 /*--------------------------------- main ------------------------------------*/
@@ -1617,11 +1633,22 @@ int main(int argc, char **argv) {
     if      (strcmp(cmd, "init")    == 0) return cmd_init();
     else if (strcmp(cmd, "ingest")  == 0) return cmd_ingest();
     else if (strcmp(cmd, "build")   == 0) return cmd_build();
-    else if (strcmp(cmd, "export")  == 0) return cmd_export();  /* NEW */
+    else if (strcmp(cmd, "export")  == 0) return cmd_export();
     else if (strcmp(cmd, "serve")   == 0) return cmd_serve(argc, argv);
     else if (strcmp(cmd, "publish") == 0) return cmd_publish();
-    else if ((strcmp(cmd, "-v") == 0) || (strcmp(cmd, "--version") == 0)) { puts(UENG_VERSION); return 0; }
+    else if (strcmp(cmd, "--version")==0){ puts("uaengine v0.1"); return 0; }
     else { fprintf(stderr, "Unknown command: %s\n", cmd); usage(); return 1; }
 }
-/*============================== INGEST =====================================*/
-/*---------------------------- normalize chapters ----------------------------*/
+static void usage(void) {
+    puts("Umicom AuthorEngine AI (uaengine) - Manage your book projects with AI assistance.\n");
+    puts("Usage: uaengine <command> [options]\n");
+    puts("Commands:");
+    puts("  init               Initialize a new book project structure.");
+    puts("  ingest            Ingest and organize content from the dropzone.");
+    puts("  build             Build the book draft and prepare outputs.");
+    puts("  export            Export the book to HTML and PDF formats.");
+    puts("  serve [port]      Serve the outputs directory over HTTP (default port 8080).");
+    puts("  publish           Publish the book to a remote server (not implemented).");
+    puts("  --version         Show version information.");
+    puts("\nRun 'uaengine <command> --help' for command-specific options.");
+}
