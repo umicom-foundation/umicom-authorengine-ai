@@ -7,19 +7,20 @@
  * PURPOSE
  *   Command-line tool for the Umicom AuthorEngine.
  *   Implemented commands:
- *     - init    : prepare workspace + starter book.yaml
- *     - ingest  : scan dropzone recursively for .md/.markdown/.txt/.pdf and
- *                 draft workspace/outline.md (relative file list)
- *     - build   : optionally ingest, normalize chapters into workspace/chapters,
- *                 then write *in-place* outputs under outputs/<slug>/...
- *                 (no date folders), pack book-draft.md, and generate site.
- *     - serve   : tiny static HTTP server.
- *                 `uaengine serve` (no args) serves outputs/<slug>/site.
+ *     - init     : prepare workspace + starter book.yaml
+ *     - ingest   : scan dropzone recursively for .md/.markdown/.txt/.pdf and
+ *                  draft workspace/outline.md (relative file list)
+ *     - build    : optionally ingest, normalize chapters -> workspace/chapters/,
+ *                  create date-based outputs, CLEAN target (overwrite),
+ *                  generate toc/frontmatter/ack/frontcover/cover.svg,
+ *                  pack workspace/book-draft.md, create site/index.html
+ *     - export   : (new) use pandoc to export HTML, then headless Edge/Chrome to PDF
+ *     - serve    : tiny static HTTP server; `uaengine serve` (no args) serves today’s site
  *
- * STYLE / GOALS
+ * DESIGN NOTES
  *   - C-first (C17 baseline), portable; small #ifdefs for Windows/POSIX.
- *   - Safe string handling (snprintf/memcpy), minimal allocation, heavy comments.
- *   - No heavy deps: standard C + sockets + simple filesystem ops.
+ *   - Safer I/O on Windows (fopen_s / sscanf_s).
+ *   - No heavy deps: stdlib + sockets + filesystem ops. `export` shells to pandoc.
  *---------------------------------------------------------------------------*/
 
 #include <stdio.h>
@@ -30,10 +31,11 @@
 #include <time.h>
 #include "ueng/version.h"
 
-/*---- Forward declarations for commands & helpers --------------------------*/
+/*---- Forward declarations --------------------------------------------------*/
 static int  cmd_init(void);
 static int  cmd_ingest(void);
 static int  cmd_build(void);
+static int  cmd_export(void);   /* NEW */
 static int  cmd_serve(int argc, char** argv);
 static int  cmd_publish(void);
 static void usage(void);
@@ -41,24 +43,16 @@ static void usage(void);
 static void build_date_utc(char* out, size_t outsz);
 static void build_timestamp_utc(char* out, size_t outsz);
 
-/* site index generator (defined later) */
-static int  write_site_index(const char* site_dir,
-                             const char* title,
-                             const char* author,
-                             const char* slug,
-                             const char* stamp,
-                             int has_cover,
-                             int has_draft);
+/* helpers used in several places */
+static int  write_file(const char *path, const char *content);
+static int  copy_file_binary(const char* src, const char* dst);
 
-/* chapter/aux generators (defined later) */
-static int  generate_toc_md(const char* book_title);
-static int  generate_frontmatter_md(const char* title, const char* author);
-static int  generate_acknowledgements_md(const char* author);
-static int  generate_cover_svg(const char* title, const char* author, const char* slug);
-static int  generate_frontcover_md(const char* title, const char* author, const char* slug);
-static int  pack_book_draft(const char* title,
-                            const char* outputs_root,
-                            int* out_has_draft);
+/* export helpers */
+static int  write_default_css_if_absent(void);
+static int  copy_theme_into_html_dir(const char* html_dir, char* out_rel_css, size_t outsz);
+static int  exec_cmd(const char* cmdline);
+static int  path_abs(const char* in, char* out, size_t outsz);
+static void path_to_file_url(const char* abs, char* out, size_t outsz);
 
 /*--- Platform-specific includes for directory & sockets --------------------*/
 #ifdef _WIN32
@@ -99,9 +93,7 @@ static int  pack_book_draft(const char* title,
   #endif
 #endif
 
-/*----------------------------------------------------------------------------*
- * helper_exists_file — 1 if path exists, else 0
- *----------------------------------------------------------------------------*/
+/*----------------------------------------------------------------------------*/
 static int helper_exists_file(const char *path) {
 #ifdef _WIN32
     return (access(path, 0) == ACCESS_EXISTS) ? 1 : 0;
@@ -109,10 +101,6 @@ static int helper_exists_file(const char *path) {
     return (access(path, FOK) == 0) ? 1 : 0;
 #endif
 }
-
-/*----------------------------------------------------------------------------*
- * ueng_fopen — cross-platform fopen (fopen_s on Windows)
- *----------------------------------------------------------------------------*/
 static FILE* ueng_fopen(const char* path, const char* mode) {
 #ifdef _WIN32
     FILE* f = NULL;
@@ -121,10 +109,6 @@ static FILE* ueng_fopen(const char* path, const char* mode) {
     return fopen(path, mode);
 #endif
 }
-
-/*----------------------------------------------------------------------------*
- * ueng_inet_pton4 — cross-platform IPv4 text -> binary
- *----------------------------------------------------------------------------*/
 static int ueng_inet_pton4(const char* src, void* dst) {
 #ifdef _WIN32
     return (InetPtonA(AF_INET, src, dst) == 1) ? 1 : 0;
@@ -132,10 +116,6 @@ static int ueng_inet_pton4(const char* src, void* dst) {
     return inet_pton(AF_INET, src, dst);
 #endif
 }
-
-/*----------------------------------------------------------------------------*
- * trim helpers — remove leading/trailing whitespace (in-place)
- *----------------------------------------------------------------------------*/
 static char* ltrim(char* s) { while (*s && isspace((unsigned char)*s)) s++; return s; }
 static void  rtrim(char* s) { size_t n=strlen(s); while (n>0 && isspace((unsigned char)s[n-1])) s[--n]='\0'; }
 static void  unquote(char* s) {
@@ -146,9 +126,7 @@ static void  unquote(char* s) {
     }
 }
 
-/*----------------------------------------------------------------------------*
- * mkpath — create all intermediate directories (mkdir -p)
- *----------------------------------------------------------------------------*/
+/* mkdir -p */
 static int mkpath(const char *path) {
     if (!path || !*path) return 0;
     size_t len = strlen(path);
@@ -179,9 +157,6 @@ static int mkpath(const char *path) {
     free(buf); return 0;
 }
 
-/*----------------------------------------------------------------------------*
- * write_text_file_if_absent — create file with content if missing
- *----------------------------------------------------------------------------*/
 static int write_text_file_if_absent(const char *path, const char *content) {
     if (helper_exists_file(path)) { printf("[init] skip (exists): %s\n", path); return 0; }
     FILE *f = ueng_fopen(path, "wb");
@@ -191,10 +166,6 @@ static int write_text_file_if_absent(const char *path, const char *content) {
     printf("[init] wrote: %s\n", path);
     return 0;
 }
-
-/*----------------------------------------------------------------------------*
- * write_file — overwrite (or create) file with content
- *----------------------------------------------------------------------------*/
 static int write_file(const char *path, const char *content) {
     FILE *f = ueng_fopen(path, "wb");
     if (!f) { fprintf(stderr, "[write] ERROR: cannot open '%s' for writing\n", path); return -1; }
@@ -202,8 +173,6 @@ static int write_file(const char *path, const char *content) {
     fclose(f);
     return 0;
 }
-
-/* Append entire file into already-open dst (binary). */
 static int append_file(FILE* dst, const char* src_path) {
     FILE* src = ueng_fopen(src_path, "rb");
     if (!src) return -1;
@@ -216,10 +185,6 @@ static int append_file(FILE* dst, const char* src_path) {
     fclose(src);
     return 0;
 }
-
-/*----------------------------------------------------------------------------*
- * write_gitkeep — "<dir>/.gitkeep"
- *----------------------------------------------------------------------------*/
 static int write_gitkeep(const char *dir) {
     const char *leaf = ".gitkeep";
     int need = snprintf(NULL, 0, "%s%c%s", dir, PATH_SEP, leaf);
@@ -233,9 +198,7 @@ static int write_gitkeep(const char *dir) {
     return rc;
 }
 
-/*----------------------------------------------------------------------------*
- * seed_book_yaml — minimal starter manifest
- *----------------------------------------------------------------------------*/
+/* manifest starter */
 static int seed_book_yaml(void) {
     const char *yaml =
         "# Umicom AuthorEngine AI — Book manifest (starter)\n"
@@ -260,9 +223,7 @@ static int seed_book_yaml(void) {
     return write_text_file_if_absent("book.yaml", yaml);
 }
 
-/*----------------------------------------------------------------------------*
- * tiny_yaml_get / tiny_yaml_get_bool
- *----------------------------------------------------------------------------*/
+/* tiny yaml getters */
 static int tiny_yaml_get(const char* filename, const char* key, char* out, size_t outsz) {
     FILE* f = ueng_fopen(filename, "rb");
     if (!f) return -1;
@@ -300,13 +261,10 @@ static int tiny_yaml_get_bool(const char* filename, const char* key, int* out) {
     for (char* p = buf; *p; ++p) *p = (char)tolower((unsigned char)*p);
     if (!strcmp(buf, "true") || !strcmp(buf, "yes") || !strcmp(buf, "on") || !strcmp(buf, "1")) { *out = 1; return 0; }
     if (!strcmp(buf, "false")|| !strcmp(buf, "no")  || !strcmp(buf, "off")|| !strcmp(buf, "0")) { *out = 0; return 0; }
-    *out = (buf[0] != '\0');
-    return 0;
+    *out = (buf[0] != '\0'); return 0;
 }
 
-/*----------------------------------------------------------------------------*
- * slugify — lower-case, keep [a-z0-9], others -> '-', collapse runs
- *----------------------------------------------------------------------------*/
+/* slug */
 static void slugify(const char* title, char* out, size_t outsz) {
     size_t j = 0; int prev_dash = 0;
     for (size_t i = 0; title[i] && j + 1 < outsz; ++i) {
@@ -319,9 +277,7 @@ static void slugify(const char* title, char* out, size_t outsz) {
     if (j == 0) snprintf(out, outsz, "%s", "untitled");
 }
 
-/*----------------------------------------------------------------------------*
- * build_date_utc / build_timestamp_utc
- *----------------------------------------------------------------------------*/
+/* dates */
 static void build_date_utc(char* out, size_t outsz) {
     time_t now = time(NULL);
     struct tm g;
@@ -343,14 +299,11 @@ static void build_timestamp_utc(char* out, size_t outsz) {
     strftime(out, outsz, "%Y-%m-%dT%H-%M-%SZ", &g);
 }
 
-/*----------------------------------------------------------------------------*
- * clean_dir — remove all children of a directory, leaving the dir itself.
- *----------------------------------------------------------------------------*/
+/* clean-dir (rm -rf children) */
 #ifdef _WIN32
 static int clean_dir(const char* dir) {
     if (!helper_exists_file(dir)) return 0;
     int rc = 0;
-
     int patn = snprintf(NULL, 0, "%s\\*", dir);
     if (patn < 0) return -1;
     char* pattern = (char*)malloc((size_t)patn + 1);
@@ -418,9 +371,19 @@ static int clean_dir(const char* dir) {
 #endif
 
 /*========================= String list + helpers ============================*/
-typedef struct { char **items; size_t count, cap; } StrList;
+typedef struct {
+    char **items;
+    size_t count;
+    size_t cap;
+} StrList;
+
 static void sl_init(StrList *sl) { sl->items=NULL; sl->count=0; sl->cap=0; }
-static void sl_free(StrList *sl) { if (!sl) return; for (size_t i=0;i<sl->count;i++) free(sl->items[i]); free(sl->items); sl->items=NULL; sl->count=sl->cap=0; }
+static void sl_free(StrList *sl) {
+    if (!sl) return;
+    for (size_t i=0;i<sl->count;i++) free(sl->items[i]);
+    free(sl->items);
+    sl->items=NULL; sl->count=sl->cap=0;
+}
 static int sl_push(StrList *sl, const char* s) {
     if (sl->count == sl->cap) {
         size_t ncap = sl->cap ? sl->cap*2 : 16;
@@ -435,8 +398,6 @@ static int sl_push(StrList *sl, const char* s) {
     sl->items[sl->count++] = dup;
     return 0;
 }
-
-/* Case-insensitive compare + natural sort */
 static int ci_cmp(const char* a, const char* b) {
     for (;;) {
         unsigned char ca = (unsigned char)tolower(*a);
@@ -452,7 +413,6 @@ static int natural_ci_cmp(const char* a, const char* b) {
     for (;;) {
         unsigned char ca = (unsigned char)a[i];
         unsigned char cb = (unsigned char)b[j];
-
         if (ca == '\0' && cb == '\0') return 0;
         if (isdigit(ca) && isdigit(cb)) {
             unsigned long long va=0, vb=0;
@@ -476,14 +436,11 @@ static int qsort_nat_ci_cmp(const void* A, const void* B) {
     const char* b = *(const char* const*)B;
     return natural_ci_cmp(a,b);
 }
-
 static int endswith_ic(const char* s, const char* suffix) {
     size_t ns = strlen(s), nx = strlen(suffix);
     if (nx > ns) return 0;
     return ci_cmp(s + (ns - nx), suffix) == 0;
 }
-
-/* Normalize rel path to use '/' for Markdown portability */
 static void rel_normalize(char* s) {
 #ifdef _WIN32
     for (char* p = s; *p; ++p) if (*p == '\\') *p = '/';
@@ -499,7 +456,7 @@ static void rel_to_native_sep(char* s) {
 #endif
 }
 
-/* Recursive directory walk — used by ingest & normalization */
+/* walk (used by ingest + normalize) */
 #ifdef _WIN32
 static int ingest_walk(const char* abs_dir, const char* rel_dir, StrList* out) {
     int patn = snprintf(NULL, 0, "%s\\*", abs_dir);
@@ -592,9 +549,7 @@ static int ingest_walk(const char* abs_dir, const char* rel_dir, StrList* out) {
 }
 #endif
 
-/*----------------------------------------------------------------------------*
- * write_outline_md — used by cmd_ingest (ASCII dash for console)
- *----------------------------------------------------------------------------*/
+/* outline writer (ASCII dash for console portability) */
 static int write_outline_md(const char* title, const char* author,
                             const char* dropzone_rel, const StrList* files) {
     (void)mkpath("workspace");
@@ -634,7 +589,6 @@ static int write_outline_md(const char* title, const char* author,
             }
         }
     }
-
     n = snprintf(buf + used, est - used,
         "\n---\n"
         "_Tip:_ Add your chapters as **Markdown** files under `%s` and re-run `uaengine ingest`.\n",
@@ -647,9 +601,7 @@ static int write_outline_md(const char* title, const char* author,
     return rc;
 }
 
-/*----------------------------------------------------------------------------*
- * cmd_ingest — outline scan of dropzone
- *----------------------------------------------------------------------------*/
+/*----------------------------- cmd_ingest ----------------------------------*/
 static int cmd_ingest(void) {
     char title[256]={0}, author[256]={0}, drop[256]={0};
     if (tiny_yaml_get("book.yaml","title", title,sizeof(title))  != 0) snprintf(title, sizeof(title),  "%s","Untitled");
@@ -677,12 +629,15 @@ static int cmd_ingest(void) {
 /*======================== Chapter normalization (build) =====================*/
 static int ensure_parent_dir(const char* filepath) {
     const char* last_sep = NULL;
-    for (const char* p = filepath; *p; ++p) if (*p == PATH_SEP) last_sep = p;
+    for (const char* p = filepath; *p; ++p) {
+        if (*p == PATH_SEP) last_sep = p;
+    }
     if (!last_sep) return 0;
     size_t n = (size_t)(last_sep - filepath);
     char* dir = (char*)malloc(n + 1);
     if (!dir) return -1;
-    memcpy(dir, filepath, n); dir[n] = '\0';
+    memcpy(dir, filepath, n);
+    dir[n] = '\0';
     int rc = mkpath(dir);
     free(dir);
     return rc;
@@ -694,30 +649,34 @@ static int copy_file_binary(const char* src, const char* dst) {
     FILE* out = ueng_fopen(dst, "wb");
     if (!out) { fclose(in); fprintf(stderr, "[copy] open dst fail: %s\n", dst); return -1; }
 
-    char buf[64*1024]; size_t rd;
+    char buf[64*1024];
+    size_t rd;
     while ((rd = fread(buf, 1, sizeof(buf), in)) > 0) {
         size_t wr = fwrite(buf, 1, rd, out);
         if (wr != rd) { fclose(in); fclose(out); fprintf(stderr, "[copy] short write: %s\n", dst); return -1; }
     }
-    fclose(in); fclose(out);
+    fclose(in);
+    fclose(out);
     return 0;
 }
-
-/* Strip top-level "chapters/" if present to avoid workspace/chapters/chapters/... */
+/* strip leading "chapters/" */
 static const char* strip_leading_chapters(const char* rel) {
     size_t i = 0;
     while (rel[i] && rel[i] != '/' && rel[i] != '\\') i++;
     if (i == 8 &&
-        (rel[0]=='c'||rel[0]=='C') && (rel[1]=='h'||rel[1]=='H') &&
-        (rel[2]=='a'||rel[2]=='A') && (rel[3]=='p'||rel[3]=='P') &&
-        (rel[4]=='t'||rel[4]=='T') && (rel[5]=='e'||rel[5]=='E') &&
-        (rel[6]=='r'||rel[6]=='R') && (rel[7]=='s'||rel[7]=='S')) {
+        (rel[0]=='c'||rel[0]=='C') &&
+        (rel[1]=='h'||rel[1]=='H') &&
+        (rel[2]=='a'||rel[2]=='A') &&
+        (rel[3]=='p'||rel[3]=='P') &&
+        (rel[4]=='t'||rel[4]=='T') &&
+        (rel[5]=='e'||rel[5]=='E') &&
+        (rel[6]=='r'||rel[6]=='R') &&
+        (rel[7]=='s'||rel[7]=='S')) {
         if (rel[i] == '/' || rel[i] == '\\') return rel + i + 1;
         return rel + i;
     }
     return rel;
 }
-
 static int normalize_chapters(const char* dropzone) {
     StrList files; sl_init(&files);
     char abs[1024]; snprintf(abs, sizeof(abs), "%s", dropzone);
@@ -725,13 +684,18 @@ static int normalize_chapters(const char* dropzone) {
     if (rc != 0) { fprintf(stderr, "[normalize] walk failed\n"); sl_free(&files); return 1; }
 
     if (mkpath("workspace") != 0) fprintf(stderr,"[normalize] WARN: workspace create\n");
-    if (helper_exists_file("workspace/chapters")) { (void)clean_dir("workspace/chapters"); }
-    else { (void)mkpath("workspace/chapters"); }
+    if (helper_exists_file("workspace/chapters")) {
+        (void)clean_dir("workspace/chapters");
+    } else {
+        (void)mkpath("workspace/chapters");
+    }
 
     size_t copied = 0, skipped = 0;
     for (size_t i=0; i<files.count; ++i) {
         const char* rel = files.items[i];
-        if (!(endswith_ic(rel,".md") || endswith_ic(rel,".markdown") || endswith_ic(rel,".txt"))) { skipped++; continue; }
+        if (!(endswith_ic(rel,".md") || endswith_ic(rel,".markdown") || endswith_ic(rel,".txt"))) {
+            skipped++; continue;
+        }
 
         char rel_native[1024]; snprintf(rel_native, sizeof(rel_native), "%s", rel);
         rel_to_native_sep(rel_native);
@@ -739,8 +703,11 @@ static int normalize_chapters(const char* dropzone) {
         const char* relp = strip_leading_chapters(rel_native);
         if (*relp == '\0') { skipped++; continue; }
 
-        char src[1200]; snprintf(src, sizeof(src), "%s%c%s", dropzone, PATH_SEP, rel_native);
-        char dst[1200]; snprintf(dst, sizeof(dst), "workspace%cchapters%c%s", PATH_SEP, PATH_SEP, relp);
+        char src[1200];
+        snprintf(src, sizeof(src), "%s%c%s", dropzone, PATH_SEP, rel_native);
+
+        char dst[1200];
+        snprintf(dst, sizeof(dst), "workspace%cchapters%c%s", PATH_SEP, PATH_SEP, relp);
 
         if (copy_file_binary(src, dst) == 0) copied++;
         else fprintf(stderr,"[normalize] copy failed: %s -> %s\n", src, dst);
@@ -757,25 +724,35 @@ static int normalize_chapters(const char* dropzone) {
     return 0;
 }
 
-/*============================ TOC generation ================================*/
+/*------------------------------- TOC ---------------------------------------*/
 static void titlecase_inplace(char* s) {
     int new_word = 1;
     for (size_t i=0; s[i]; ++i) {
         unsigned char c = (unsigned char)s[i];
-        if (isalpha(c)) { s[i] = (char)(new_word ? toupper(c) : tolower(c)); new_word = 0; }
-        else if (isdigit(c)) { new_word = 0; }
-        else { s[i] = ' '; new_word = 1; }
+        if (isalpha(c)) {
+            s[i] = (char)(new_word ? toupper(c) : tolower(c));
+            new_word = 0;
+        } else if (isdigit(c)) {
+            new_word = 0;
+        } else {
+            s[i] = ' ';
+            new_word = 1;
+        }
     }
     size_t w=0;
     for (size_t r=0; s[r]; ++r) {
         if (s[r] == ' ' && (w==0 || s[w-1]==' ')) continue;
         s[w++] = s[r];
     }
-    if (w>0 && s[w-1]==' ') w--; s[w]='\0';
+    if (w>0 && s[w-1]==' ') w--;
+    s[w]='\0';
 }
 static void make_label_from_filename(const char* filename, char* out, size_t outsz) {
-    const char* base = filename; const char* slash = strrchr(filename, '/'); if (slash) base = slash + 1;
-    size_t n = strlen(base); if (n >= outsz) n = outsz - 1;
+    const char* base = filename;
+    const char* slash = strrchr(filename, '/');
+    if (slash) base = slash + 1;
+    size_t n = strlen(base);
+    if (n >= outsz) n = outsz - 1;
     memcpy(out, base, n); out[n] = '\0';
     char* dot = strrchr(out, '.'); if (dot) *dot = '\0';
     titlecase_inplace(out);
@@ -784,7 +761,8 @@ static void make_label_from_filename(const char* filename, char* out, size_t out
         size_t j=i; unsigned num=0; int had_digit=0;
         while (isdigit((unsigned char)out[j])) { had_digit=1; num = num*10u + (unsigned)(out[j]-'0'); j++; }
         if (had_digit) {
-            char rest[256]; size_t k=0; while (out[j]==' ') j++;
+            char rest[256]; size_t k=0;
+            while (out[j]==' ') j++;
             for (; out[j] && k+1<sizeof(rest); ++j) rest[k++] = out[j];
             rest[k]='\0';
             char tmp[512];
@@ -805,9 +783,10 @@ static int generate_toc_md(const char* book_title) {
     StrList kept; sl_init(&kept);
     for (size_t i=0; i<files.count; ++i) {
         const char* rel = files.items[i];
-        const char* base = rel; const char* slash = strrchr(rel, '/'); if (slash) base = slash + 1;
-        if (base[0] == '_') continue;            /* skip helper files */
-        if (endswith_ic(rel,".pdf")) continue;   /* skip PDFs */
+        const char* base = rel; const char* slash = strrchr(rel, '/');
+        if (slash) base = slash + 1;
+        if (base[0] == '_') continue;
+        if (endswith_ic(rel,".pdf")) continue;
 
         int need = snprintf(NULL, 0, "chapters/%s", rel);
         if (need < 0) { sl_free(&files); sl_free(&kept); return 1; }
@@ -818,7 +797,6 @@ static int generate_toc_md(const char* book_title) {
         free(path);
     }
     sl_free(&files);
-
     if (kept.count > 1) qsort(kept.items, kept.count, sizeof(char*), qsort_nat_ci_cmp);
 
     (void)mkpath("workspace");
@@ -846,17 +824,24 @@ static int generate_toc_md(const char* book_title) {
             n = snprintf(buf + used, est - used, "- [%s](<%s>)\n", label, link);
             if (n < 0) { free(buf); sl_free(&kept); return 1; }
             used += (size_t)n;
-            if (used + 256 > est) { est *= 2; char* tmp = (char*)realloc(buf, est); if (!tmp) { free(buf); sl_free(&kept); return 1; } buf = tmp; }
+            if (used + 256 > est) {
+                est *= 2;
+                char* tmp = (char*)realloc(buf, est);
+                if (!tmp) { free(buf); sl_free(&kept); return 1; }
+                buf = tmp;
+            }
         }
     }
 
     int wr = write_file(outpath, buf);
-    free(buf); sl_free(&kept);
-    if (wr == 0) printf("[toc] wrote: %s\n", outpath); else fprintf(stderr, "[toc] ERROR: failed to write %s\n", outpath);
+    free(buf);
+    sl_free(&kept);
+    if (wr == 0) printf("[toc] wrote: %s\n", outpath);
+    else         fprintf(stderr, "[toc] ERROR: failed to write %s\n", outpath);
     return wr == 0 ? 0 : 1;
 }
 
-/*===================== Frontmatter / Ack / Cover ===========================*/
+/*----------------- frontmatter / ack / cover / pack draft -------------------*/
 static int generate_frontmatter_md(const char* title, const char* author) {
     (void)mkpath("workspace");
 
@@ -881,7 +866,7 @@ static int generate_frontmatter_md(const char* title, const char* author) {
         "**Author:** %s  \n"
         "%s**Language:** %s  \n"
         "**Date:** %s  \n"
-        "%s**Copyright:** \xC2\xA9 %s %s\n"
+        "%s**Copyright:** © %s %s\n"
         "\n"
         "%s",
         (title && *title)? title : "Untitled",
@@ -905,7 +890,6 @@ static int generate_frontmatter_md(const char* title, const char* author) {
     else         fprintf(stderr, "[frontmatter] ERROR: failed to write %s\n", outpath);
     return wr == 0 ? 0 : 1;
 }
-
 static int generate_acknowledgements_md(const char* author) {
     (void)mkpath("workspace");
     const char* outpath = "workspace/acknowledgements.md";
@@ -926,11 +910,9 @@ static int generate_acknowledgements_md(const char* author) {
     (void)author;
     return wr == 0 ? 0 : 1;
 }
-
 static int generate_cover_svg(const char* title, const char* author, const char* slug) {
     (void)mkpath("workspace");
     const char* outpath = "workspace/cover.svg";
-
     const char* tpl =
 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
 "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1600\" height=\"2560\" viewBox=\"0 0 1600 2560\">\n"
@@ -951,33 +933,26 @@ static int generate_cover_svg(const char* title, const char* author, const char*
 "    <text x=\"120\" y=\"2360\" font-size=\"40\">slug: %s</text>\n"
 "  </g>\n"
 "</svg>\n";
-
-    int need = snprintf(NULL, 0, tpl,
-                        (title && *title)? title : "Untitled",
-                        (author && *author)? author : "Unknown",
-                        (slug && *slug)? slug : "untitled");
+    int need = snprintf(NULL, 0, tpl, (title && *title)? title : "Untitled",
+                                  (author && *author)? author : "Unknown",
+                                  (slug && *slug)? slug : "untitled");
     if (need < 0) return -1;
     size_t size = (size_t)need + 1;
-
     char* svg = (char*)malloc(size);
     if (!svg) return -1;
-    (void)snprintf(svg, size, tpl,
-                   (title && *title)? title : "Untitled",
-                   (author && *author)? author : "Unknown",
-                   (slug && *slug)? slug : "untitled");
-
+    (void)snprintf(svg, size, tpl, (title && *title)? title : "Untitled",
+                              (author && *author)? author : "Unknown",
+                              (slug && *slug)? slug : "untitled");
     int wr = write_file("workspace/cover.svg", svg);
     free(svg);
     if (wr == 0) printf("[cover] wrote: workspace/cover.svg\n");
-    else         fprintf(stderr, "[cover] ERROR: failed to write cover.svg\n");
+    else         fprintf(stderr, "[cover] ERROR: write cover.svg\n");
     return wr == 0 ? 0 : 1;
 }
-
 static int generate_frontcover_md(const char* title, const char* author, const char* slug) {
     (void)mkpath("workspace");
     const char* outpath = "workspace/frontcover.md";
     char day[32]; build_date_utc(day, sizeof(day));
-
     const char* tpl =
 "# Front Cover\n\n"
 "A starter cover has been generated at `workspace/cover.svg`.\n"
@@ -986,7 +961,6 @@ static int generate_frontcover_md(const char* title, const char* author, const c
 "**Author:** %s  \n"
 "**Slug:** %s  \n"
 "**Date:** %s  \n";
-
     int need = snprintf(NULL, 0, tpl,
                         (title && *title)? title : "Untitled",
                         (author && *author)? author : "Unknown",
@@ -994,7 +968,6 @@ static int generate_frontcover_md(const char* title, const char* author, const c
                         day);
     if (need < 0) return -1;
     size_t size = (size_t)need + 1;
-
     char* md = (char*)malloc(size);
     if (!md) return -1;
     (void)snprintf(md, size, tpl,
@@ -1002,7 +975,6 @@ static int generate_frontcover_md(const char* title, const char* author, const c
                    (author && *author)? author : "Unknown",
                    (slug && *slug)? slug : "untitled",
                    day);
-
     int wr = write_file(outpath, md);
     free(md);
     if (wr == 0) printf("[frontcover] wrote: %s\n", outpath);
@@ -1010,7 +982,7 @@ static int generate_frontcover_md(const char* title, const char* author, const c
     return wr == 0 ? 0 : 1;
 }
 
-/*========================= PACK: workspace/book-draft.md ====================*/
+/* pack book-draft */
 static int list_chapter_files(StrList* out_rel) {
     const char* root = "workspace/chapters";
     if (!helper_exists_file(root)) return 0;
@@ -1019,9 +991,11 @@ static int list_chapter_files(StrList* out_rel) {
 
     for (size_t i=0; i<all.count; ++i) {
         const char* rel = all.items[i];
-        const char* base = rel; const char* slash = strrchr(rel, '/'); if (slash) base = slash + 1;
-        if (base[0] == '_') continue;                 /* skip helper files */
-        if (endswith_ic(rel, ".pdf")) continue;       /* skip PDFs */
+        const char* base = rel;
+        const char* slash = strrchr(rel, '/');
+        if (slash) base = slash + 1;
+        if (base[0] == '_') continue;
+        if (endswith_ic(rel, ".pdf")) continue;
         if (!(endswith_ic(rel, ".md") || endswith_ic(rel, ".markdown") || endswith_ic(rel, ".txt")))
             continue;
 
@@ -1037,7 +1011,6 @@ static int list_chapter_files(StrList* out_rel) {
     if (out_rel->count > 1) qsort(out_rel->items, out_rel->count, sizeof(char*), qsort_nat_ci_cmp);
     return 0;
 }
-
 static int pack_book_draft(const char* title,
                            const char* outputs_root,
                            int* out_has_draft) {
@@ -1055,12 +1028,10 @@ static int pack_book_draft(const char* title,
     } else {
         fprintf(out, "# %s\n\n", (title && *title) ? title : "Untitled");
     }
-
     if (helper_exists_file("workspace/toc.md")) {
         fputs(SEP, out);
         if (append_file(out, "workspace/toc.md") != 0) { fclose(out); return 1; }
     }
-
     StrList chapters; sl_init(&chapters);
     if (list_chapter_files(&chapters) != 0) { fclose(out); sl_free(&chapters); return 1; }
     for (size_t i=0; i<chapters.count; ++i) {
@@ -1068,26 +1039,21 @@ static int pack_book_draft(const char* title,
         if (append_file(out, chapters.items[i]) != 0) { fclose(out); sl_free(&chapters); return 1; }
     }
     sl_free(&chapters);
-
     if (helper_exists_file("workspace/acknowledgements.md")) {
         fputs(SEP, out);
         if (append_file(out, "workspace/acknowledgements.md") != 0) { fclose(out); return 1; }
     }
-
     fclose(out);
     printf("[pack] wrote: %s\n", ws_draft);
 
-    /* copy into outputs/<slug>/md and site */
-    char dst_md[1024];   snprintf(dst_md,  sizeof(dst_md),  "%s%cmd%cbook-draft.md",  outputs_root, PATH_SEP, PATH_SEP);
-    char dst_site[1024]; snprintf(dst_site,sizeof(dst_site),"%s%csite%cbook-draft.md", outputs_root, PATH_SEP, PATH_SEP);
-
+    char dst_md[1024];  snprintf(dst_md,  sizeof(dst_md),  "%s%cmd%cbook-draft.md",  outputs_root, PATH_SEP, PATH_SEP);
+    char dst_site[1024];snprintf(dst_site,sizeof(dst_site),"%s%csite%cbook-draft.md", outputs_root, PATH_SEP, PATH_SEP);
     if (copy_file_binary(ws_draft, dst_md) == 0)  printf("[pack] copied: %s\n", dst_md);
-    if (copy_file_binary(ws_draft, dst_site) == 0) { printf("[pack] copied: %s\n", dst_site); if (out_has_draft) *out_has_draft = 1; }
-
+    if (copy_file_binary(ws_draft, dst_site) == 0){printf("[pack] copied: %s\n", dst_site); if (out_has_draft) *out_has_draft = 1;}
     return 0;
 }
 
-/*=============================== INIT ======================================*/
+/*------------------------------- cmd_init ----------------------------------*/
 static int cmd_init(void) {
     const char *dirs[] = {
         "dropzone","dropzone/images","workspace","outputs",
@@ -1101,7 +1067,8 @@ static int cmd_init(void) {
     puts("[init] complete."); return 0;
 }
 
-/*=============================== BUILD =====================================*/
+/*---------------------------- site/index.html -------------------------------*/
+static const char* serve_guess_mime(const char* path); /* fwd (used later) */
 static int write_site_index(const char* site_dir,
                             const char* title,
                             const char* author,
@@ -1113,7 +1080,7 @@ static int write_site_index(const char* site_dir,
     if (snprintf(path, sizeof(path), "%s%cindex.html", site_dir, PATH_SEP) < 0) return -1;
 
     const char* cover_block =
-"    <img src=\"cover.svg\" alt=\"Cover\" style=\"max-width:100%%;height:auto;border:1px solid #ddd;border-radius:12px;margin-top:1rem\"/>\n";
+"    <img class=\"cover\" src=\"cover.svg\" alt=\"Cover\" />\n";
 
     const char* draft_block =
 "    <p><a href=\"book-draft.md\" download>Download book-draft.md</a></p>\n";
@@ -1125,22 +1092,19 @@ static int write_site_index(const char* site_dir,
 "  <meta charset=\"utf-8\">\n"
 "  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
 "  <title>%s — Umicom AuthorEngine AI</title>\n"
-"  <style>\n"
-"    body{font-family:system-ui,-apple-system,\"Segoe UI\",Roboto,Ubuntu,sans-serif;margin:2rem;line-height:1.5}\n"
-"    .card{border:1px solid #ddd;border-radius:12px;padding:1.5rem;max-width:900px}\n"
-"    code{background:#f6f8fa;padding:2px 6px;border-radius:6px}\n"
-"    .muted{color:#666}\n"
-"  </style>\n"
+"  <link rel=\"stylesheet\" href=\"../html/style.css\"/>\n"
 "</head>\n"
 "<body>\n"
+"  <main>\n"
 "  <div class=\"card\">\n"
 "    <h1>%s</h1>\n"
-"    <p class=\"muted\">by %s</p>\n"
+"    <p class=\"meta\">by %s</p>\n"
 "    <p><strong>Slug:</strong> <code>%s</code><br><strong>Build:</strong> <code>%s</code></p>\n";
 
     const char* tpl_b =
-"    <p>This site was generated by <strong>Umicom AuthorEngine AI</strong>. Replace this page with your own content during the render stage.</p>\n"
+"    <p>This site was generated by <strong>Umicom AuthorEngine AI</strong>. Replace this page during render stage.</p>\n"
 "  </div>\n"
+"  </main>\n"
 "</body>\n"
 "</html>\n";
 
@@ -1156,8 +1120,16 @@ static int write_site_index(const char* site_dir,
     if (n < 0) { free(html); return -1; }
     size_t used = (size_t)n;
 
-    if (has_cover) { n = (int)snprintf(html + used, est - used, "%s", cover_block); if (n < 0) { free(html); return -1; } used += (size_t)n; }
-    if (has_draft) { n = (int)snprintf(html + used, est - used, "%s", draft_block); if (n < 0) { free(html); return -1; } used += (size_t)n; }
+    if (has_cover) {
+        n = (int)snprintf(html + used, est - used, "%s", cover_block);
+        if (n < 0) { free(html); return -1; }
+        used += (size_t)n;
+    }
+    if (has_draft) {
+        n = (int)snprintf(html + used, est - used, "%s", draft_block);
+        if (n < 0) { free(html); return -1; }
+        used += (size_t)n;
+    }
 
     n = snprintf(html + used, est - used, "%s", tpl_b);
     if (n < 0) { free(html); return -1; }
@@ -1167,8 +1139,8 @@ static int write_site_index(const char* site_dir,
     return (wr == 0) ? 0 : -1;
 }
 
+/*------------------------------- cmd_build ---------------------------------*/
 static int cmd_build(void) {
-    /* 1) Load metadata from book.yaml */
     char title[256]={0}, author[256]={0}; int rc;
     rc = tiny_yaml_get("book.yaml","title", title,sizeof(title));
     if (rc == -1) { fprintf(stderr,"[build] ERROR: cannot open book.yaml (run `uaengine init`)\n"); return 1; }
@@ -1177,35 +1149,33 @@ static int cmd_build(void) {
     if (rc == -1) { fprintf(stderr,"[build] ERROR: cannot open book.yaml\n"); return 1; }
     if (rc ==  1) { snprintf(author,sizeof(author),"%s","Unknown"); }
 
-    /* 2) Optionally ingest first */
     int ingest_first = 0;
     if (tiny_yaml_get_bool("book.yaml", "ingest_on_build", &ingest_first) == 0 && ingest_first) {
         puts("[build] ingest_on_build: true — running ingest...");
-        if (cmd_ingest() != 0) fprintf(stderr, "[build] WARN: ingest failed; continuing build.\n");
+        if (cmd_ingest() != 0) fprintf(stderr, "[build] WARN: ingest failed; continuing.\n");
     }
-
-    /* 3) Normalize chapters into workspace/chapters */
-    int norm = 0; char drop[256]={0};
+    int norm = 0;
+    char drop[256]={0};
     if (tiny_yaml_get("book.yaml","dropzone",drop,sizeof(drop)) != 0) snprintf(drop,sizeof(drop),"%s","dropzone");
     if (tiny_yaml_get_bool("book.yaml","normalize_chapters_on_build",&norm) == 0 && norm) {
         printf("[build] normalize_chapters_on_build: true — mirroring from %s\n", drop);
         if (normalize_chapters(drop) != 0) fprintf(stderr,"[build] WARN: chapter normalization failed; continuing.\n");
     }
 
-    /* 4) Generate scaffold docs in workspace/ */
     (void)generate_toc_md(title);
     (void)generate_frontmatter_md(title, author);
     (void)generate_acknowledgements_md(author);
 
-    /* 5) Compute slug + timestamp and prepare outputs/<slug> (IN-PLACE, no dates) */
     char slug[256]; slugify(title, slug, sizeof(slug));
+    char day[32];   build_date_utc(day, sizeof(day));
     char stamp[64]; build_timestamp_utc(stamp, sizeof(stamp));
 
-    char root[512]; snprintf(root,sizeof(root),"outputs%c%s",PATH_SEP,slug);
+    char root[512];
+    snprintf(root,sizeof(root),"outputs%c%s%c%s",PATH_SEP,slug,PATH_SEP,day);
 
     if (helper_exists_file(root)) {
         printf("[build] cleaning existing: %s\n", root);
-        if (clean_dir(root) != 0) fprintf(stderr,"[build] WARN: could not fully clean %s (some files may remain)\n", root);
+        if (clean_dir(root) != 0) fprintf(stderr,"[build] WARN: could not fully clean %s\n", root);
     } else {
         if (mkpath(root) != 0) { fprintf(stderr,"[build] ERROR: cannot create %s\n", root); return 1; }
     }
@@ -1213,11 +1183,19 @@ static int cmd_build(void) {
 
     const char *sub[] = {"pdf","docx","epub","html","md","cover","video-scripts","site",NULL};
     for (int i=0; sub[i]!=NULL; ++i) {
-        char p[640]; snprintf(p,sizeof(p),"%s%c%s",root,PATH_SEP,sub[i]);
+        char p[640];
+        snprintf(p,sizeof(p),"%s%c%s",root,PATH_SEP,sub[i]);
         if (mkpath(p)!=0) fprintf(stderr,"[build] WARN: cannot create %s\n",p);
     }
 
-    /* 6) Cover: generate or pick user one; copy to cover/ and site/ */
+    /* ensure default CSS available for serve */
+    {
+        char html_dir[640]; snprintf(html_dir,sizeof(html_dir),"%s%c%s",root,PATH_SEP,"html");
+        char rel_css_tmp[16];
+        (void)copy_theme_into_html_dir(html_dir, rel_css_tmp, sizeof(rel_css_tmp));
+    }
+
+    /* cover */
     char ws_cover[640]; snprintf(ws_cover, sizeof(ws_cover), "workspace%ccover.svg", PATH_SEP);
     if (!helper_exists_file(ws_cover)) {
         char ws_chap_cover[640]; snprintf(ws_chap_cover, sizeof(ws_chap_cover), "workspace%cchapters%ccover.svg", PATH_SEP, PATH_SEP);
@@ -1230,29 +1208,173 @@ static int cmd_build(void) {
     char cover_dst_archive[640]; snprintf(cover_dst_archive, sizeof(cover_dst_archive), "%s%ccover%ccover.svg", root, PATH_SEP, PATH_SEP);
     char cover_dst_site[640];    snprintf(cover_dst_site,    sizeof(cover_dst_site),    "%s%csite%ccover.svg",  root, PATH_SEP, PATH_SEP);
     if (helper_exists_file(ws_cover)) {
-        if (copy_file_binary(ws_cover, cover_dst_archive) == 0) { has_cover = helper_exists_file(cover_dst_archive); if (has_cover) printf("[cover] copied (archive): %s\n", cover_dst_archive); }
-        if (copy_file_binary(ws_cover, cover_dst_site) == 0)    { if (helper_exists_file(cover_dst_site)) { printf("[cover] copied (site): %s\n", cover_dst_site); has_cover = 1; } }
+        if (copy_file_binary(ws_cover, cover_dst_archive) == 0) {
+            has_cover = helper_exists_file(cover_dst_archive);
+            if (has_cover) printf("[cover] copied (archive): %s\n", cover_dst_archive);
+        }
+        if (copy_file_binary(ws_cover, cover_dst_site) == 0) {
+            if (helper_exists_file(cover_dst_site)) { printf("[cover] copied (site): %s\n", cover_dst_site); has_cover = 1; }
+        }
     }
 
-    /* 7) BUILDINFO.txt with timestamp (no date folders anymore) */
     char info_path[640]; snprintf(info_path,sizeof(info_path),"%s%cBUILDINFO.txt",root,PATH_SEP);
     char info[1024];
     int n = snprintf(info,sizeof(info),
-        "Title:  %s\nAuthor: %s\nSlug:   %s\nStamp:  %s\n",
-        title,author,slug,stamp);
+        "Title:  %s\nAuthor: %s\nSlug:   %s\nDate:   %s\nStamp:  %s\n",
+        title,author,slug,day,stamp);
     if (n<0 || n>=(int)sizeof(info)) fprintf(stderr,"[build] WARN: info truncated\n");
     if (write_file(info_path, info)!=0) { fprintf(stderr,"[build] ERROR: cannot write BUILDINFO.txt\n"); return 1; }
 
-    /* 8) Pack a single Markdown draft and copy it into md/ and site/ */
     int has_draft = 0;
     if (pack_book_draft(title, root, &has_draft) != 0) fprintf(stderr, "[build] WARN: failed to create book-draft.md\n");
 
-    /* 9) Auto-generate site/index.html (cover + draft link if present) */
     char site_dir[640]; snprintf(site_dir,sizeof(site_dir),"%s%c%s",root,PATH_SEP,"site");
-    if (write_site_index(site_dir, title, author, slug, stamp, has_cover, has_draft) != 0) fprintf(stderr,"[build] WARN: could not write site/index.html\n");
+    if (write_site_index(site_dir, title, author, slug, stamp, has_cover, has_draft) != 0) {
+        fprintf(stderr,"[build] WARN: could not write site/index.html\n");
+    }
 
     printf("[build] ok: %s\n", root);
-    puts("[build] outputs are overwritten in-place on every build.");
+    puts("[build] outputs will be overwritten on subsequent builds for the same date.");
+    return 0;
+}
+
+/*=============================== EXPORT =====================================*/
+/* write default theme if missing */
+static int write_default_css_if_absent(void) {
+    (void)mkpath("themes");
+    if (helper_exists_file("themes/uae.css")) return 0;
+    const char* minimal = "/* placeholder: user should have created themes/uae.css already */\n";
+    return write_file("themes/uae.css", minimal);
+}
+/* copy themes/uae.css into <html_dir>/style.css and return relative name */
+static int copy_theme_into_html_dir(const char* html_dir, char* out_rel_css, size_t outsz) {
+    if (write_default_css_if_absent() != 0) return -1;
+    char dst[1024];
+    snprintf(dst, sizeof(dst), "%s%cstyle.css", html_dir, PATH_SEP);
+    if (copy_file_binary("themes/uae.css", dst) != 0) return -1;
+    snprintf(out_rel_css, outsz, "style.css");
+    return 0;
+}
+static int exec_cmd(const char* cmdline) {
+    printf("[exec] %s\n", cmdline);
+    int rc = system(cmdline);
+    if (rc != 0) fprintf(stderr, "[exec] command failed (rc=%d)\n", rc);
+    return rc;
+}
+static int path_abs(const char* in, char* out, size_t outsz) {
+#ifdef _WIN32
+    DWORD n = GetFullPathNameA(in, (DWORD)outsz, out, NULL);
+    return (n>0 && n<outsz) ? 0 : -1;
+#else
+    if (!realpath(in, out)) return -1;
+    return 0;
+#endif
+}
+static void path_to_file_url(const char* abs, char* out, size_t outsz) {
+#ifdef _WIN32
+    size_t j=0;
+    const char* pfx = "file:///";
+    for (size_t i=0; pfx[i] && j+1<outsz; ++i) out[j++] = pfx[i];
+    for (size_t i=0; abs[i] && j+1<outsz; ++i) {
+        char c = abs[i];
+        if (c=='\\') c='/';
+        out[j++] = c;
+    }
+    out[j]='\0';
+#else
+    snprintf(out, outsz, "file://%s", abs);
+#endif
+}
+static int cmd_export(void) {
+    /* read title/slug/day */
+    char title[256]={0}, author[256]={0};
+    if (tiny_yaml_get("book.yaml","title", title,sizeof(title))  != 0) snprintf(title,sizeof(title),  "%s","Untitled");
+    if (tiny_yaml_get("book.yaml","author",author,sizeof(author))!= 0) snprintf(author,sizeof(author), "%s","Unknown");
+    char slug[256]; slugify(title, slug, sizeof(slug));
+    char day[32]; build_date_utc(day, sizeof(day));
+
+    /* ensure build-draft exists */
+    if (!helper_exists_file("workspace/book-draft.md")) {
+        fprintf(stderr, "[export] workspace/book-draft.md not found. Run `uaengine build` first.\n");
+        return 1;
+    }
+
+    /* paths */
+    char root[512]; snprintf(root,sizeof(root),"outputs%c%s%c%s",PATH_SEP,slug,PATH_SEP,day);
+    char html_dir[640]; snprintf(html_dir,sizeof(html_dir), "%s%chtml", root, PATH_SEP);
+    char pdf_dir[640];  snprintf(pdf_dir, sizeof(pdf_dir),  "%s%cpdf",  root, PATH_SEP);
+    (void)mkpath(html_dir); (void)mkpath(pdf_dir);
+
+    /* copy theme -> html/style.css */
+    char rel_css[64]; rel_css[0]='\0';
+    if (copy_theme_into_html_dir(html_dir, rel_css, sizeof(rel_css)) != 0) {
+        fprintf(stderr, "[export] WARN: could not copy theme; continuing.\n");
+    }
+
+    /* pandoc -> HTML */
+    char out_html[768]; snprintf(out_html, sizeof(out_html), "%s%cbook.html", html_dir, PATH_SEP);
+    char cmd1[2048];
+    if (rel_css[0]) {
+        snprintf(cmd1, sizeof(cmd1),
+           
+"pandoc \"workspace%cbook-draft.md\" -f markdown -t html5 -s --toc --metadata title=\"%s\" -c \"%s\" -o \"%s\"",
+
+            PATH_SEP, title, rel_css, out_html);
+    } else {
+        snprintf(cmd1, sizeof(cmd1),
+        "pandoc \"workspace%cbook-draft.md\" -f markdown -t html5 -s --toc --metadata title=\"%s\" -o \"%s\"",
+
+                        PATH_SEP, title, out_html);
+    }
+    if (exec_cmd(cmd1) != 0) {
+        fprintf(stderr, "[export] ERROR: pandoc HTML failed.\n");
+        return 1;
+    }
+
+    /* headless HTML->PDF */
+    char pdf_path[768]; snprintf(pdf_path, sizeof(pdf_path), "%s%cbook.pdf", pdf_dir, PATH_SEP);
+
+#ifdef _WIN32
+    /* find Edge or Chrome */
+    const char* candidates[] = {
+        "C:\\\\Program Files (x86)\\\\Microsoft\\\\Edge\\\\Application\\\\msedge.exe",
+        "C:\\\\Program Files\\\\Microsoft\\\\Edge\\\\Application\\\\msedge.exe",
+        "C:\\\\Program Files\\\\Google\\\\Chrome\\\\Application\\\\chrome.exe",
+        "C:\\\\Program Files (x86)\\\\Google\\\\Chrome\\\\Application\\\\chrome.exe",
+        NULL
+    };
+    char browser[512] = {0};
+    for (int i=0; candidates[i]; ++i) {
+        if (helper_exists_file(candidates[i])) { snprintf(browser, sizeof(browser), "%s", candidates[i]); break; }
+    }
+    if (!browser[0]) {
+        fprintf(stderr, "[export] WARN: Edge/Chrome not found; skipping PDF.\n");
+        printf("[export] HTML: %s\n", out_html);
+        return 0;
+    }
+
+    char abs_html[1024]; if (path_abs(out_html, abs_html, sizeof(abs_html)) != 0) snprintf(abs_html, sizeof(abs_html), "%s", out_html);
+    char file_url[1200]; path_to_file_url(abs_html, file_url, sizeof(file_url));
+
+    char cmd2[2048];
+    snprintf(cmd2, sizeof(cmd2),
+        "\"%s\" --headless=new --disable-gpu --print-to-pdf=\"%s\" --no-margins \"%s\"",
+        browser, pdf_path, file_url);
+
+    if (exec_cmd(cmd2) != 0) {
+        fprintf(stderr, "[export] WARN: headless PDF failed (browser).\n");
+    } else {
+        printf("[export] PDF: %s\n", pdf_path);
+    }
+#else
+    /* Non-Windows: try wkhtmltopdf */
+    const char* wk = "wkhtmltopdf";
+    char cmd2[2048];
+    snprintf(cmd2, sizeof(cmd2), "%s \"%s\" \"%s\"", wk, out_html, pdf_path);
+    if (exec_cmd(cmd2) != 0) fprintf(stderr, "[export] WARN: wkhtmltopdf failed or not installed.\n");
+#endif
+
+    printf("[export] HTML: %s\n", out_html);
     return 0;
 }
 
@@ -1275,6 +1397,7 @@ static const char* serve_guess_mime(const char* path) {
 static int serve_build_fs_path(char* out, size_t outsz, const char* root, const char* uri) {
     if (!uri || !*uri) uri = "/";
     if (strstr(uri, "..")) return -1;
+    if (strchr(uri, '%')) return -1;
     size_t ulen = strcspn(uri, "?\r\n");
     int need_index = (ulen == 1 && uri[0] == '/');
 
@@ -1320,9 +1443,9 @@ static void serve_handle_client(sock_t cs, const char* root) {
     char method[8]={0}, uri[1024]={0};
 #ifdef _WIN32
     if (sscanf_s(req, "%7s %1023s", method, (unsigned)sizeof(method), uri, (unsigned)sizeof(uri)) != 2
-        || strcmp(method,"GET")!=0) {
+        || (strcmp(method,"GET")!=0 && strcmp(method,"HEAD")!=0) {
 #else
-    if (sscanf(req, "%7s %1023s", method, uri) != 2 || strcmp(method,"GET")!=0) {
+    if (sscanf(req, "%7s %1023s", method, uri) != 2 || (strcmp(method,"GET")!=0 && strcmp(method,"HEAD")!=0) {
 #endif
         const char* m = "HTTP/1.0 405 Method Not Allowed\r\nConnection: close\r\n\r\n";
         (void)serve_send_all(cs, m, strlen(m));
@@ -1330,6 +1453,7 @@ static void serve_handle_client(sock_t cs, const char* root) {
     }
 
     char path[1024];
+    if (strchr(uri, '%')) { const char* m = "HTTP/1.0 400 Bad Request\r\nConnection: close\r\n\r\n"; (void)serve_send_all(cs, m, strlen(m)); closesock(cs); return; }
     if (serve_build_fs_path(path, sizeof(path), root, uri) != 0) {
         const char* m = "HTTP/1.0 400 Bad Request\r\nConnection: close\r\n\r\n";
         (void)serve_send_all(cs, m, strlen(m)); closesock(cs); return;
@@ -1345,12 +1469,6 @@ static void serve_handle_client(sock_t cs, const char* root) {
     long sz = ftell(f); if (sz < 0) { fclose(f); closesock(cs); return; }
     rewind(f);
 
-    char* buf = (char*)malloc((size_t)sz);
-    if (!buf) { fclose(f); closesock(cs); return; }
-    size_t rd = fread(buf, 1, (size_t)sz, f);
-    fclose(f);
-    if (rd != (size_t)sz) { free(buf); closesock(cs); return; }
-
     char header[512];
     const char* mime = serve_guess_mime(path);
     int h = snprintf(header, sizeof(header),
@@ -1361,51 +1479,79 @@ static void serve_handle_client(sock_t cs, const char* root) {
     if (h < 0 || h >= (int)sizeof(header)) { free(buf); closesock(cs); return; }
 
     (void)serve_send_all(cs, header, (size_t)h);
-    (void)serve_send_all(cs, buf, (size_t)sz);
-    free(buf);
-    closesock(cs);
+    if (strcmp(method,"HEAD")==0) { fclose(f); closesock(cs); return; }
+
+/* stream file in chunks */
+{
+    FILE* f2 = ueng_fopen(path, "rb");
+    if (!f2) { closesock(cs); return; }
+    char chunk[65536];
+    size_t nrd2;
+    while ((nrd2 = fread(chunk, 1, sizeof(chunk), f2)) > 0) {
+        if (serve_send_all(cs, chunk, nrd2) != 0) { fclose(f2); closesock(cs); return; }
+    }
+    fclose(f2);
+}
+closesock(cs);
+closesock(cs);
 }
 
-/*=========================== usage & dispatch ===============================*/
+/*--------------------------- usage & dispatch -------------------------------*/
 static void usage(void) {
     printf("uaengine %s\n", UENG_VERSION);
-    printf("Usage: uaengine <init|ingest|build|serve|publish|--version>\n");
+    printf("Usage: uaengine <init|ingest|build|export|serve|publish|--version>\n");
 }
 static int cmd_publish(void) { puts("[publish] repo (TODO)"); return 0; }
 
-/* Convenience: `uaengine serve` uses outputs/<slug>/site */
+/* Convenience: `uaengine serve` uses today's outputs/<slug>/<YYYY-MM-DD>/site */
 static int cmd_serve(int argc, char** argv) {
     char auto_root[1024] = {0};
     const char* root = NULL;
     int port = 8080;
-
+    char host[64] = "127.0.0.1";
     int auto_mode = 0;
-    if (argc == 2) {
-        auto_mode = 1;
-    } else if (argc == 3) {
-        int alldigit = 1;
-        for (const char* p = argv[2]; *p; ++p) if (!isdigit((unsigned char)*p)) { alldigit = 0; break; }
-        if (alldigit) { port = (int)strtol(argv[2], NULL, 10); auto_mode = 1; }
-        else root = argv[2];
-    } else {
-        root = argv[2];
-        if (argc >= 4) {
-            long p = strtol(argv[3], NULL, 10);
-            if (p > 0 && p < 65536) port = (int)p;
+
+    /* Parse args
+       Forms:
+         uaengine serve                         -> auto, host=127.0.0.1, port=8080
+         uaengine serve 8081                    -> auto, custom port
+         uaengine serve <folder> [port]         -> explicit folder
+         uaengine serve --host 0.0.0.0 --port 8080 [<folder>]
+    */
+    int i = 2;
+    while (i < argc) {
+        const char* a = argv[i];
+        if (strcmp(a, "--host") == 0 && i+1 < argc) {
+            snprintf(host, sizeof(host), "%s", argv[i+1]);
+            i += 2; continue;
         }
+        if (strcmp(a, "--port") == 0 && i+1 < argc) {
+            port = (int)strtol(argv[i+1], NULL, 10);
+            i += 2; continue;
+        }
+        /* bare number -> port (auto mode) */
+        int alldigit = 1;
+        for (const char* p=a; *p; ++p) if (!isdigit((unsigned char)*p)) { alldigit=0; break; }
+        if (alldigit) { port = (int)strtol(a, NULL, 10); auto_mode = 1; i++; continue; }
+        /* otherwise treat as root */
+        root = a; i++;
     }
 
+    if (!root) auto_mode = 1;
     if (auto_mode) {
-        char title[256]={0}, slug[256]={0};
+        char title[256]={0};
+        char slug[256]={0};
+        char day[32]={0};
         if (tiny_yaml_get("book.yaml","title", title,sizeof(title)) != 0) snprintf(title,sizeof(title),"%s","Untitled");
         slugify(title, slug, sizeof(slug));
-        snprintf(auto_root, sizeof(auto_root), "outputs%c%s%csite", PATH_SEP, slug, PATH_SEP);
+        build_date_utc(day, sizeof(day));
+        snprintf(auto_root, sizeof(auto_root), "outputs%c%s%c%s%csite", PATH_SEP, slug, PATH_SEP, day, PATH_SEP);
         root = auto_root;
     }
 
     if (!root) {
-        puts("Usage: uaengine serve [folder-to-serve] [port]");
-        puts("       uaengine serve              # auto: outputs/<slug>/site");
+        puts("Usage: uaengine serve [folder] [port] [--host <ip>] [--port <n>]");
+        puts("       uaengine serve              # auto: today's outputs/<slug>/<YYYY-MM-DD>/site");
         puts("       uaengine serve 8081         # auto + custom port");
         return 1;
     }
@@ -1421,7 +1567,6 @@ static int cmd_serve(int argc, char** argv) {
 
     sock_t s = socket(AF_INET, SOCK_STREAM, 0);
     if (s == SOCK_INVALID) { fprintf(stderr, "[serve] ERROR: socket()\n"); goto cleanup_ws; }
-
     int opt=1;
 #ifdef _WIN32
     setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
@@ -1430,11 +1575,9 @@ static int cmd_serve(int argc, char** argv) {
 #endif
 
     struct sockaddr_in addr; memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons((unsigned short)port);
+    addr.sin_family = AF_INET; addr.sin_port = htons((unsigned short)port);
     if (ueng_inet_pton4("127.0.0.1", &addr.sin_addr) != 1) {
-        fprintf(stderr, "[serve] ERROR: inet_pton failed\n");
-        closesock(s); goto cleanup_ws;
+        fprintf(stderr, "[serve] ERROR: inet_pton failed\n"); closesock(s); goto cleanup_ws;
     }
 
     if (bind(s, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
@@ -1446,7 +1589,8 @@ static int cmd_serve(int argc, char** argv) {
         closesock(s); goto cleanup_ws;
     }
 
-    printf("[serve] Serving %s at http://127.0.0.1:%d\n", root, port);
+    printf("[serve] Serving %s at http://%s:%d
+", root, host, port);
     printf("[serve] Press Ctrl+C to stop.\n");
 
     for (;;) {
@@ -1464,15 +1608,21 @@ cleanup_ws:
     return 0;
 }
 
-/* Entry */
+/*--------------------------------- main ------------------------------------*/
 int main(int argc, char **argv) {
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+#endif
     if (argc < 2) { usage(); return 0; }
     const char *cmd = argv[1];
     if      (strcmp(cmd, "init")    == 0) return cmd_init();
     else if (strcmp(cmd, "ingest")  == 0) return cmd_ingest();
     else if (strcmp(cmd, "build")   == 0) return cmd_build();
+    else if (strcmp(cmd, "export")  == 0) return cmd_export();  /* NEW */
     else if (strcmp(cmd, "serve")   == 0) return cmd_serve(argc, argv);
     else if (strcmp(cmd, "publish") == 0) return cmd_publish();
     else if ((strcmp(cmd, "-v") == 0) || (strcmp(cmd, "--version") == 0)) { puts(UENG_VERSION); return 0; }
     else { fprintf(stderr, "Unknown command: %s\n", cmd); usage(); return 1; }
 }
+/*============================== INGEST =====================================*/
+/*---------------------------- normalize chapters ----------------------------*/
