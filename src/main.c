@@ -1440,60 +1440,77 @@ static void serve_handle_client(sock_t cs, const char* root) {
 #endif
     if (n <= 0) { closesock(cs); return; }
 
-    char method[8]={0}, uri[1024]={0};
+    char method[8] = {0};
+    char uri[1024] = {0};
+
 #ifdef _WIN32
-    if (sscanf_s(req, "%7s %1023s", method, (unsigned)sizeof(method), uri, (unsigned)sizeof(uri)) != 2
-        || (strcmp(method,"GET")!=0 && strcmp(method,"HEAD")!=0) {
+    if (sscanf_s(req, "%7s %1023s", method, (unsigned)sizeof(method),
+                 uri, (unsigned)sizeof(uri)) != 2 ||
+        (strcmp(method, "GET") != 0 && strcmp(method, "HEAD") != 0)) {
 #else
-    if (sscanf(req, "%7s %1023s", method, uri) != 2 || (strcmp(method,"GET")!=0 && strcmp(method,"HEAD")!=0) {
+    if (sscanf(req, "%7s %1023s", method, uri) != 2 ||
+        (strcmp(method, "GET") != 0 && strcmp(method, "HEAD") != 0)) {
 #endif
         const char* m = "HTTP/1.0 405 Method Not Allowed\r\nConnection: close\r\n\r\n";
         (void)serve_send_all(cs, m, strlen(m));
-        closesock(cs); return;
+        closesock(cs);
+        return;
+    }
+
+    if (strchr(uri, '%')) {
+        const char* m = "HTTP/1.0 400 Bad Request\r\nConnection: close\r\n\r\n";
+        (void)serve_send_all(cs, m, strlen(m));
+        closesock(cs);
+        return;
     }
 
     char path[1024];
-    if (strchr(uri, '%')) { const char* m = "HTTP/1.0 400 Bad Request\r\nConnection: close\r\n\r\n"; (void)serve_send_all(cs, m, strlen(m)); closesock(cs); return; }
     if (serve_build_fs_path(path, sizeof(path), root, uri) != 0) {
         const char* m = "HTTP/1.0 400 Bad Request\r\nConnection: close\r\n\r\n";
-        (void)serve_send_all(cs, m, strlen(m)); closesock(cs); return;
+        (void)serve_send_all(cs, m, strlen(m));
+        closesock(cs);
+        return;
     }
 
-    FILE* f = ueng_fopen(path, "rb");
-    if (!f) {
-        const char* m404 = "HTTP/1.0 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n404 Not Found\n";
-        (void)serve_send_all(cs, m404, strlen(m404)); closesock(cs); return;
-    }
+#ifdef _WIN32
+    FILE* f; if (fopen_s(&f, path, "rb")) { serve_send_404(cs); closesock(cs); return; }
+#else
+    FILE* f = fopen(path, "rb"); if (!f) { serve_send_404(cs); closesock(cs); return; }
+#endif
 
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); closesock(cs); return; }
     long sz = ftell(f); if (sz < 0) { fclose(f); closesock(cs); return; }
     rewind(f);
 
-    char header[512];
     const char* mime = serve_guess_mime(path);
+
+    char header[512];
     int h = snprintf(header, sizeof(header),
         "HTTP/1.0 200 OK\r\n"
         "Content-Type: %s\r\n"
         "Content-Length: %ld\r\n"
-        "Connection: close\r\n\r\n", mime, sz);
-    if (h < 0 || h >= (int)sizeof(header)) { free(buf); closesock(cs); return; }
+        "X-Content-Type-Options: nosniff\r\n"
+        "Connection: close\r\n\r\n",
+        mime, sz);
 
-    (void)serve_send_all(cs, header, (size_t)h);
-    if (strcmp(method,"HEAD")==0) { fclose(f); closesock(cs); return; }
+    if (h < 0 || h >= (int)sizeof(header)) { fclose(f); closesock(cs); return; }
 
-/* stream file in chunks */
-{
-    FILE* f2 = ueng_fopen(path, "rb");
-    if (!f2) { closesock(cs); return; }
-    char chunk[65536];
-    size_t nrd2;
-    while ((nrd2 = fread(chunk, 1, sizeof(chunk), f2)) > 0) {
-        if (serve_send_all(cs, chunk, nrd2) != 0) { fclose(f2); closesock(cs); return; }
+    /* Send headers */
+    if (serve_send_all(cs, header, (size_t)h) != 0) { fclose(f); closesock(cs); return; }
+
+    /* HEAD = headers only */
+    if (strcmp(method, "HEAD") == 0) { fclose(f); closesock(cs); return; }
+
+    /* Stream body in chunks */
+    char buf[65536];
+    size_t nrd;
+    while ((nrd = fread(buf, 1, sizeof(buf), f)) > 0) {
+        if (serve_send_all(cs, buf, nrd) != 0) { fclose(f); closesock(cs); return; }
     }
-    fclose(f2);
+
+    fclose(f);
+    closesock(cs);
 }
-closesock(cs);
-closesock(cs);
 }
 
 /*--------------------------- usage & dispatch -------------------------------*/
@@ -1508,49 +1525,32 @@ static int cmd_serve(int argc, char** argv) {
     char auto_root[1024] = {0};
     const char* root = NULL;
     int port = 8080;
-    char host[64] = "127.0.0.1";
-    int auto_mode = 0;
 
-    /* Parse args
-       Forms:
-         uaengine serve                         -> auto, host=127.0.0.1, port=8080
-         uaengine serve 8081                    -> auto, custom port
-         uaengine serve <folder> [port]         -> explicit folder
-         uaengine serve --host 0.0.0.0 --port 8080 [<folder>]
-    */
-    int i = 2;
-    while (i < argc) {
-        const char* a = argv[i];
-        if (strcmp(a, "--host") == 0 && i+1 < argc) {
-            snprintf(host, sizeof(host), "%s", argv[i+1]);
-            i += 2; continue;
-        }
-        if (strcmp(a, "--port") == 0 && i+1 < argc) {
-            port = (int)strtol(argv[i+1], NULL, 10);
-            i += 2; continue;
-        }
-        /* bare number -> port (auto mode) */
+    int auto_mode = 0;
+    if (argc == 2) auto_mode = 1;
+    else if (argc == 3) {
         int alldigit = 1;
-        for (const char* p=a; *p; ++p) if (!isdigit((unsigned char)*p)) { alldigit=0; break; }
-        if (alldigit) { port = (int)strtol(a, NULL, 10); auto_mode = 1; i++; continue; }
-        /* otherwise treat as root */
-        root = a; i++;
+        for (const char* p = argv[2]; *p; ++p) if (!isdigit((unsigned char)*p)) { alldigit = 0; break; }
+        if (alldigit) { port = (int)strtol(argv[2], NULL, 10); auto_mode = 1; }
+        else root = argv[2];
+    } else {
+        root = argv[2];
+        if (argc >= 4) {
+            long p = strtol(argv[3], NULL, 10);
+            if (p > 0 && p < 65536) port = (int)p;
+        }
     }
 
-    if (!root) auto_mode = 1;
     if (auto_mode) {
-        char title[256]={0};
-        char slug[256]={0};
-        char day[32]={0};
+        char title[256]={0}, slug[256]={0}, day[32]={0};
         if (tiny_yaml_get("book.yaml","title", title,sizeof(title)) != 0) snprintf(title,sizeof(title),"%s","Untitled");
         slugify(title, slug, sizeof(slug));
         build_date_utc(day, sizeof(day));
         snprintf(auto_root, sizeof(auto_root), "outputs%c%s%c%s%csite", PATH_SEP, slug, PATH_SEP, day, PATH_SEP);
         root = auto_root;
     }
-
     if (!root) {
-        puts("Usage: uaengine serve [folder] [port] [--host <ip>] [--port <n>]");
+        puts("Usage: uaengine serve [folder-to-serve] [port]");
         puts("       uaengine serve              # auto: today's outputs/<slug>/<YYYY-MM-DD>/site");
         puts("       uaengine serve 8081         # auto + custom port");
         return 1;
@@ -1589,8 +1589,7 @@ static int cmd_serve(int argc, char** argv) {
         closesock(s); goto cleanup_ws;
     }
 
-    printf("[serve] Serving %s at http://%s:%d
-", root, host, port);
+    printf("[serve] Serving %s at http://127.0.0.1:%d\n", root, port);
     printf("[serve] Press Ctrl+C to stop.\n");
 
     for (;;) {
