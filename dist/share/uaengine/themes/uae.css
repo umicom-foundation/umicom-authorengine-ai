@@ -1,0 +1,63 @@
+﻿:root {
+  --fg: #0f172a;
+  --muted: #475569;
+  --bg: #fff;
+  --card: #f8fafc;
+  --accent: #0ea5e9;
+}
+
+* {
+  box-sizing: border-box
+}
+
+body {
+  margin: 0;
+  font: 16px/1.6 system-ui, Segoe UI, Roboto, Arial, sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+  padding: 2rem
+}
+
+main {
+  max-width: 960px;
+  margin: 0 auto
+}
+
+.card {
+  background: var(--card);
+  padding: 2rem;
+  border-radius: 16px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .06)
+}
+
+h1,
+h2,
+h3 {
+  line-height: 1.25;
+  margin: .8em 0 .4em
+}
+
+.meta {
+  color: var(--muted)
+}
+
+code,
+pre {
+  font-family: ui-monospace, Consolas, Menlo, monospace
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none
+}
+
+a:hover {
+  text-decoration: underline
+}
+
+img.cover {
+  display: block;
+  max-width: 320px;
+  border-radius: 12px;
+  margin: 1rem 0
+}

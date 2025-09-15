@@ -13,3 +13,9 @@ add_executable(uaengine
 )
 
 target_include_directories(uaengine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# near the bottom of CMakeLists.txt
+install(TARGETS uaengine RUNTIME DESTINATION bin)
+
+# optional: install starter theme
+install(FILES themes/uae.css DESTINATION share/uaengine/themes OPTIONAL)
