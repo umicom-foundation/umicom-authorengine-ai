@@ -2,7 +2,7 @@
  * Umicom AuthorEngine AI (uaengine) — Minimal CLI in C
  * Created by: Umicom Foundation (https://umicom.foundation/)
  * Author: Sammy Hegab
- * Date: 14-09-2025
+ * Date: 15-09-2025
  *
  * PURPOSE
  *   Command-line tool for the Umicom AuthorEngine.
@@ -15,7 +15,9 @@
  *                  generate toc/frontmatter/ack/frontcover/cover.svg,
  *                  pack workspace/book-draft.md, create site/index.html
  *     - export   : use pandoc to export HTML, then headless Edge/Chrome to PDF
- *     - serve    : tiny static HTTP server; `uaengine serve` serves today’s site
+ *     - serve    : tiny static HTTP server; defaults to today’s site
+ *     - doctor   : dependency + environment checks
+ *     - new      : create a new chapter in dropzone/chapters
  *
  * DESIGN NOTES
  *   - C-first (C17 baseline), portable; small #ifdefs for Windows/POSIX.
@@ -29,8 +31,7 @@
 #include <errno.h>
 #include <ctype.h>
 #include <time.h>
-
-#include "ueng/version.h" /* keep this as your project header; adjust if needed */
+#include "ueng/version.h"
 
 /*---- Forward declarations --------------------------------------------------*/
 static int  cmd_init(void);
@@ -39,6 +40,8 @@ static int  cmd_build(void);
 static int  cmd_export(void);
 static int  cmd_serve(int argc, char** argv);
 static int  cmd_publish(void);
+static int  cmd_doctor(void);
+static int  cmd_new(int argc, char** argv);
 static void usage(void);
 
 static void build_date_utc(char* out, size_t outsz);
@@ -47,11 +50,13 @@ static void build_timestamp_utc(char* out, size_t outsz);
 /* helpers used in several places */
 static int  write_file(const char *path, const char *content);
 static int  copy_file_binary(const char* src, const char* dst);
+static int  ensure_parent_dir(const char* filepath);
 
 /* export helpers */
 static int  write_default_css_if_absent(void);
 static int  copy_theme_into_html_dir(const char* html_dir, char* out_rel_css, size_t outsz);
 static int  exec_cmd(const char* cmdline);
+static int  exec_cmd_silent(const char* cmdline);
 static int  path_abs(const char* in, char* out, size_t outsz);
 static void path_to_file_url(const char* abs, char* out, size_t outsz);
 
@@ -95,7 +100,6 @@ static void path_to_file_url(const char* abs, char* out, size_t outsz);
 #endif
 
 /*----------------------------------------------------------------------------*/
-/* small utils */
 static int helper_exists_file(const char *path) {
 #ifdef _WIN32
     return (access(path, 0) == ACCESS_EXISTS) ? 1 : 0;
@@ -169,6 +173,7 @@ static int write_text_file_if_absent(const char *path, const char *content) {
     return 0;
 }
 static int write_file(const char *path, const char *content) {
+    if (ensure_parent_dir(path) != 0) { fprintf(stderr, "[write] mkpath failed for %s\n", path); return -1; }
     FILE *f = ueng_fopen(path, "wb");
     if (!f) { fprintf(stderr, "[write] ERROR: cannot open '%s' for writing\n", path); return -1; }
     if (content && *content) fputs(content, f);
@@ -551,7 +556,7 @@ static int ingest_walk(const char* abs_dir, const char* rel_dir, StrList* out) {
 }
 #endif
 
-/* outline writer */
+/* outline writer (ASCII dash for console portability) */
 static int write_outline_md(const char* title, const char* author,
                             const char* dropzone_rel, const StrList* files) {
     (void)mkpath("workspace");
@@ -1069,7 +1074,7 @@ static int cmd_init(void) {
 }
 
 /*---------------------------- site/index.html -------------------------------*/
-static const char* serve_guess_mime(const char* path); /* fwd (used later) */
+static const char* serve_guess_mime(const char* path); /* fwd */
 static int write_site_index(const char* site_dir,
                             const char* title,
                             const char* author,
@@ -1244,7 +1249,17 @@ static int cmd_build(void) {
 static int write_default_css_if_absent(void) {
     (void)mkpath("themes");
     if (helper_exists_file("themes/uae.css")) return 0;
-    const char* minimal = "/* placeholder: user should have created themes/uae.css already */\n";
+    const char* minimal =
+"/* Default theme for Umicom AuthorEngine AI */\n"
+":root { --fg:#0f172a; --muted:#475569; --bg:#fff; --card:#f8fafc; --accent:#0ea5e9; }\n"
+"*{box-sizing:border-box} body{margin:0;font:16px/1.6 system-ui,Segoe UI,Roboto,Arial,sans-serif;color:var(--fg);background:var(--bg);padding:2rem}\n"
+"main{max-width:960px;margin:0 auto}\n"
+".card{background:var(--card);padding:2rem;border-radius:16px;box-shadow:0 1px 3px rgba(0,0,0,.06)}\n"
+"h1,h2,h3{line-height:1.25;margin:.8em 0 .4em}\n"
+".meta{color:var(--muted)}\n"
+"code,pre{font-family:ui-monospace,Consolas,Menlo,monospace}\n"
+"a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}\n"
+"img.cover{display:block;max-width:320px;border-radius:12px;margin:1rem 0}\n";
     return write_file("themes/uae.css", minimal);
 }
 /* copy themes/uae.css into <html_dir>/style.css and return relative name */
@@ -1260,6 +1275,18 @@ static int exec_cmd(const char* cmdline) {
     printf("[exec] %s\n", cmdline);
     int rc = system(cmdline);
     if (rc != 0) fprintf(stderr, "[exec] command failed (rc=%d)\n", rc);
+    return rc;
+}
+static int exec_cmd_silent(const char* cmdline) {
+#ifdef _WIN32
+    char buf[2048];
+    snprintf(buf, sizeof(buf), "cmd /C \"%s >NUL 2>&1\"", cmdline);
+    int rc = system(buf);
+#else
+    char buf[2048];
+    snprintf(buf, sizeof(buf), "%s >/dev/null 2>&1", cmdline);
+    int rc = system(buf);
+#endif
     return rc;
 }
 static int path_abs(const char* in, char* out, size_t outsz) {
@@ -1312,23 +1339,28 @@ static int cmd_export(void) {
         fprintf(stderr, "[export] WARN: could not copy theme; continuing.\n");
     }
 
+    /* resource-path differs on Windows and POSIX */
+#ifdef _WIN32
+    const char* rp = ".;dropzone;workspace";
+#else
+    const char* rp = ".:dropzone:workspace";
+#endif
+
     /* pandoc -> HTML */
     char out_html[768]; snprintf(out_html, sizeof(out_html), "%s%cbook.html", html_dir, PATH_SEP);
     char cmd1[2048];
     if (rel_css[0]) {
         snprintf(cmd1, sizeof(cmd1),
             "pandoc \"workspace%cbook-draft.md\" -f markdown -t html5 -s --toc "
-            "--resource-path=.:dropzone:workspace "
-            "--metadata title=\"%s\" -M author=\"%s\" -M lang=en-GB "
-            "-c \"%s\" -o \"%s\"",
-            PATH_SEP, title, author, rel_css, out_html);
+            "--metadata title=\"%s\" -M author=\"%s\" "
+            "--resource-path=\"%s\" -c \"%s\" -o \"%s\"",
+            PATH_SEP, title, author, rp, rel_css, out_html);
     } else {
         snprintf(cmd1, sizeof(cmd1),
             "pandoc \"workspace%cbook-draft.md\" -f markdown -t html5 -s --toc "
-            "--resource-path=.:dropzone:workspace "
-            "--metadata title=\"%s\" -M author=\"%s\" -M lang=en-GB "
-            "-o \"%s\"",
-            PATH_SEP, title, author, out_html);
+            "--metadata title=\"%s\" -M author=\"%s\" "
+            "--resource-path=\"%s\" -o \"%s\"",
+            PATH_SEP, title, author, rp, out_html);
     }
     if (exec_cmd(cmd1) != 0) {
         fprintf(stderr, "[export] ERROR: pandoc HTML failed.\n");
@@ -1336,7 +1368,7 @@ static int cmd_export(void) {
     }
 
     /* headless HTML->PDF */
-    char pdf_path[768]; snprintf(pdf_path, sizeof(pdf_path), "%s%cbook.pdf", pdf_dir, PATH_SEP);
+    char pdf_path_rel[768]; snprintf(pdf_path_rel, sizeof(pdf_path_rel), "%s%cbook.pdf", pdf_dir, PATH_SEP);
 
 #ifdef _WIN32
     /* find Edge or Chrome */
@@ -1357,16 +1389,17 @@ static int cmd_export(void) {
         return 0;
     }
 
-    /* Use absolute paths for both input and output — Edge is picky here */
     char abs_html[1024]; if (path_abs(out_html, abs_html, sizeof(abs_html)) != 0) snprintf(abs_html, sizeof(abs_html), "%s", out_html);
-    char abs_pdf[1024];  if (path_abs(pdf_path, abs_pdf,  sizeof(abs_pdf))  != 0) snprintf(abs_pdf,  sizeof(abs_pdf),  "%s", pdf_path);
-
     char file_url[1200]; path_to_file_url(abs_html, file_url, sizeof(file_url));
 
-    char cmd2[2048];
-    /* Wrap with cmd /C to preserve quoted spaces in Program Files */
+    char abs_pdf[1024]; if (path_abs(pdf_path_rel, abs_pdf, sizeof(abs_pdf)) != 0) snprintf(abs_pdf, sizeof(abs_pdf), "%s", pdf_path_rel);
+
+    char cmd2[2400];
+    /* Use cmd /C to handle spaces in path; include no header/footer + no margins */
     snprintf(cmd2, sizeof(cmd2),
-        "cmd /C \"\"%s\" --headless=new --disable-gpu --print-to-pdf=\"%s\" --print-to-pdf-no-header --no-margins \"%s\"\"",
+        "cmd /C \"\"%s\" --headless=new --disable-gpu "
+        "--print-to-pdf=\"%s\" --print-to-pdf-no-header --no-margins "
+        "--run-all-compositor-stages-before-draw --virtual-time-budget=10000 \"%s\"\"",
         browser, abs_pdf, file_url);
 
     if (exec_cmd(cmd2) != 0) {
@@ -1375,10 +1408,10 @@ static int cmd_export(void) {
         printf("[export] PDF: %s\n", abs_pdf);
     }
 #else
-    /* Non-Windows: try wkhtmltopdf (best-effort) */
+    /* Non-Windows: try wkhtmltopdf */
     const char* wk = "wkhtmltopdf";
     char cmd2[2048];
-    snprintf(cmd2, sizeof(cmd2), "%s \"%s\" \"%s\"", wk, out_html, pdf_path);
+    snprintf(cmd2, sizeof(cmd2), "%s \"%s\" \"%s\"", wk, out_html, pdf_path_rel);
     if (exec_cmd(cmd2) != 0) fprintf(stderr, "[export] WARN: wkhtmltopdf failed or not installed.\n");
 #endif
 
@@ -1426,7 +1459,7 @@ static int serve_build_fs_path(char* out, size_t outsz, const char* root, const 
     snprintf(out, outsz, "%s%c%s", root, PATH_SEP, rel);
     return 0;
 }
-static int serve_send_all(sock_t s, const char* buf, size_t len);
+static int serve_send_all(sock_t s, const char* buf, size_t len); /* fwd */
 static void serve_send_404(sock_t cs) {
     const char* msg = "HTTP/1.0 404 Not Found\r\n"
                       "Content-Type: text/plain; charset=utf-8\r\n"
@@ -1472,6 +1505,7 @@ static void serve_handle_client(sock_t cs, const char* root) {
         return;
     }
 
+    /* Reject encoded traversal and .. */
     if (strchr(uri, '%')) { serve_send_404(cs); closesock(cs); return; }
 
     char path[1024];
@@ -1486,7 +1520,7 @@ static void serve_handle_client(sock_t cs, const char* root) {
 #endif
 
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); closesock(cs); return; }
-    long sz = ftell(f); if (sz < 0)  { fclose(f); closesock(cs); return; }
+    long sz = ftell(f); if (sz < 0) { fclose(f); closesock(cs); return; }
     rewind(f);
 
     const char* mime = serve_guess_mime(path);
@@ -1501,6 +1535,7 @@ static void serve_handle_client(sock_t cs, const char* root) {
         mime, sz);
 
     if (h < 0 || h >= (int)sizeof(header)) { fclose(f); closesock(cs); return; }
+
     if (serve_send_all(cs, header, (size_t)h) != 0) { fclose(f); closesock(cs); return; }
 
     if (strcmp(method, "HEAD") == 0) { fclose(f); closesock(cs); return; }
@@ -1515,97 +1550,223 @@ static void serve_handle_client(sock_t cs, const char* root) {
     closesock(cs);
 }
 
-/* Serve command: uaengine serve [root_or_host] [port]
-   Cases:
-   - uaengine serve                     -> serve outputs/<slug>/<YYYY-MM-DD>/site on 127.0.0.1:8080
-   - uaengine serve 8081                -> port-only
-   - uaengine serve 0.0.0.0 8081        -> host + port
-   - uaengine serve path\to\dir 8081    -> custom root + port
-   - uaengine serve path\to\dir         -> custom root + default port
-*/
-static int cmd_serve(int argc, char** argv) {
-    char title[256]={0}, author[256]={0};
-    if (tiny_yaml_get("book.yaml","title", title,sizeof(title))  != 0) snprintf(title,sizeof(title),  "%s","Untitled");
-    if (tiny_yaml_get("book.yaml","author",author,sizeof(author))!= 0) snprintf(author,sizeof(author), "%s","Unknown");
+/*-------------------------------- DOCTOR -----------------------------------*/
+static int check_cmd_exists(const char* name) {
+#ifdef _WIN32
+    char cmd[256]; snprintf(cmd, sizeof(cmd), "where %s", name);
+#else
+    char cmd[256]; snprintf(cmd, sizeof(cmd), "which %s", name);
+#endif
+    return exec_cmd_silent(cmd) == 0 ? 1 : 0;
+}
+static int check_write_test(const char* path) {
+    char testfile[1024];
+    snprintf(testfile, sizeof(testfile), "%s%cueng-write-test.tmp", path, PATH_SEP);
+    int rc = write_file(testfile, "ok\n");
+    if (rc == 0) {
+#ifdef _WIN32
+        DeleteFileA(testfile);
+#else
+        unlink(testfile);
+#endif
+        return 1;
+    }
+    return 0;
+}
+static int cmd_doctor(void) {
+    int ok = 1;
+
+    printf("[doctor] checking dependencies...\n");
+
+    /* pandoc */
+    int has_pandoc = check_cmd_exists("pandoc");
+    printf("  - pandoc: %s\n", has_pandoc ? "OK" : "NOT FOUND");
+    if (!has_pandoc) ok = 0;
+
+#ifdef _WIN32
+    /* Edge/Chrome */
+    const char* candidates[] = {
+        "C:\\\\Program Files (x86)\\\\Microsoft\\\\Edge\\\\Application\\\\msedge.exe",
+        "C:\\\\Program Files\\\\Microsoft\\\\Edge\\\\Application\\\\msedge.exe",
+        "C:\\\\Program Files\\\\Google\\\\Chrome\\\\Application\\\\chrome.exe",
+        "C:\\\\Program Files (x86)\\\\Google\\\\Chrome\\\\Application\\\\chrome.exe",
+        NULL
+    };
+    int has_browser = 0;
+    for (int i=0; candidates[i]; ++i) {
+        if (helper_exists_file(candidates[i])) { has_browser = 1; break; }
+    }
+    printf("  - Edge/Chrome: %s\n", has_browser ? "OK" : "NOT FOUND");
+    if (!has_browser) ok = 0;
+#else
+    int has_wk = check_cmd_exists("wkhtmltopdf");
+    printf("  - wkhtmltopdf: %s\n", has_wk ? "OK" : "NOT FOUND");
+    if (!has_wk) ok = 0;
+#endif
+
+    /* write permissions */
+    (void)mkpath("workspace");
+    int ws_ok = check_write_test("workspace");
+    printf("  - can write workspace/: %s\n", ws_ok ? "OK" : "NO");
+    if (!ws_ok) ok = 0;
+
+    char title[256]={0}; if (tiny_yaml_get("book.yaml","title", title,sizeof(title)) != 0) snprintf(title,sizeof(title),"%s","Untitled");
     char slug[256]; slugify(title, slug, sizeof(slug));
-    char day[32];   build_date_utc(day, sizeof(day));
+    char day[32]; build_date_utc(day, sizeof(day));
+    char out_root[512]; snprintf(out_root,sizeof(out_root),"outputs%c%s%c%s%chtml",PATH_SEP,slug,PATH_SEP,day,PATH_SEP);
+    (void)mkpath(out_root);
+    int out_ok = check_write_test(out_root);
+    printf("  - can write outputs/.../html: %s\n", out_ok ? "OK" : "NO");
+    if (!out_ok) ok = 0;
 
-    char default_root[640];
-    snprintf(default_root, sizeof(default_root), "outputs%c%s%c%s%csite", PATH_SEP, slug, PATH_SEP, day, PATH_SEP);
+    if (ok) {
+        puts("[doctor] All checks passed ✅");
+        return 0;
+    } else {
+        puts("[doctor] Some checks failed ❌ — please install missing tools or fix permissions.");
+        return 1;
+    }
+}
 
-    const char* a2 = (argc >= 3) ? argv[2] : NULL;
-    const char* a3 = (argc >= 4) ? argv[3] : NULL;
-
-    char root[1024]; snprintf(root, sizeof(root), "%s", default_root);
-    char host[64];   snprintf(host, sizeof(host), "127.0.0.1");
-    int  port = 8080;
-
-    if (a2 && a3) {
-        /* Two args */
-        int only_digits = 1;
-        for (const char* p=a2; *p; ++p) { if (!isdigit((unsigned char)*p) && *p!='-') { only_digits=0; break; } }
-        if (only_digits) {
-            port = atoi(a2);
-            if (port <= 0) port = 8080;
-            if (helper_exists_file(a3)) snprintf(root, sizeof(root), "%s", a3);
-            else                        snprintf(host, sizeof(host), "%s", a3);
+/*--------------------------------- NEW -------------------------------------*/
+static void sanitize_filename(char* s) {
+    for (char* p=s; *p; ++p) {
+        unsigned char c = (unsigned char)*p;
+#ifdef _WIN32
+        if (strchr("<>:\"/\\|?*", c)) *p = '_';
+#else
+        if (c=='/' || c=='\\') *p = '_';
+#endif
+    }
+}
+static void ensure_unique(char* path, size_t cap) {
+    if (!helper_exists_file(path)) return;
+    int idx = 1;
+    char base[1024]; snprintf(base, sizeof(base), "%s", path);
+    char* dot = strrchr(base, '.');
+    for (;;) {
+        if (dot) {
+            *dot = '\0';
+            snprintf(path, cap, "%s-%d.%s", base, idx, dot+1);
+            *dot = '.';
         } else {
-            if (helper_exists_file(a2)) snprintf(root, sizeof(root), "%s", a2);
-            else                        snprintf(host, sizeof(host), "%s", a2);
-            port = atoi(a3);
-            if (port <= 0) port = 8080;
+            snprintf(path, cap, "%s-%d", base, idx);
         }
-    } else if (a2) {
-        int only_digits = 1;
-        for (const char* p=a2; *p; ++p) { if (!isdigit((unsigned char)*p) && *p!='-') { only_digits=0; break; } }
-        if (only_digits) {
-            port = atoi(a2);
+        if (!helper_exists_file(path)) return;
+        idx++;
+    }
+}
+static int cmd_new(int argc, char** argv) {
+    char drop[256]={0};
+    if (tiny_yaml_get("book.yaml","dropzone",drop,sizeof(drop)) != 0) snprintf(drop,sizeof(drop),"%s","dropzone");
+
+    char target_dir[512];
+    snprintf(target_dir,sizeof(target_dir), "%s%cchapters", drop, PATH_SEP);
+    (void)mkpath(target_dir);
+
+    char title[256];
+    if (argc >= 3) {
+        snprintf(title, sizeof(title), "%s", argv[2]);
+    } else {
+        char ts[64]; build_timestamp_utc(ts, sizeof(ts));
+        snprintf(title, sizeof(title), "Chapter %s.md", ts);
+    }
+    sanitize_filename(title);
+
+    char path[1024];
+    snprintf(path, sizeof(path), "%s%cchapters%c%s", drop, PATH_SEP, PATH_SEP, title);
+    ensure_unique(path, sizeof(path));
+
+    char header[2048];
+    int n = snprintf(header, sizeof(header),
+        "# %s\n\n"
+        "_Draft created by Umicom AuthorEngine AI on %s._\n\n"
+        "Start writing here…\n",
+        title, "");
+    (void)n;
+
+    /* better header date */
+    char day[32]; build_date_utc(day, sizeof(day));
+    {
+        char buf[2048];
+        snprintf(buf, sizeof(buf),
+            "# %s\n\n"
+            "_Draft created by Umicom AuthorEngine AI on %s._\n\n"
+            "Start writing here…\n", title, day);
+        if (write_file(path, buf) != 0) {
+            fprintf(stderr, "[new] ERROR: cannot write %s\n", path);
+            return 1;
+        }
+    }
+
+    printf("[new] created: %s\n", path);
+    return 0;
+}
+
+/*------------------------------- cmd_publish --------------------------------*/
+static int cmd_publish(void) {
+    fprintf(stderr, "[publish] Not implemented yet.\n");
+    return 1;
+}
+
+/*--------------------------------- serve main -------------------------------*/
+static int cmd_serve(int argc, char** argv) {
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+#endif
+    char title[256]={0}; if (tiny_yaml_get("book.yaml","title", title,sizeof(title)) != 0) snprintf(title,sizeof(title),"%s","Untitled");
+    char slug[256]; slugify(title, slug, sizeof(slug));
+    char day[32]; build_date_utc(day, sizeof(day));
+
+    char root[1024];
+    snprintf(root, sizeof(root), "outputs%c%s%c%s%csite", PATH_SEP, slug, PATH_SEP, day, PATH_SEP);
+
+    const char* host = "127.0.0.1";
+    int port = 8080;
+
+    if (argc >= 3) {
+        host = argv[2];
+        if (argc >= 4) {
+            port = atoi(argv[3]);
             if (port <= 0) port = 8080;
-        } else {
-            if (helper_exists_file(a2)) snprintf(root, sizeof(root), "%s", a2);
-            else                        snprintf(host, sizeof(host), "%s", a2);
         }
     }
 
 #ifdef _WIN32
-    WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2,2), &wsa) != 0) {
-        fprintf(stderr, "[serve] ERROR: WSAStartup failed\n");
-        return 1;
-    }
+    WSADATA w; WSAStartup(MAKEWORD(2,2), &w);
 #endif
 
     sock_t s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s == SOCK_INVALID) {
-        fprintf(stderr, "[serve] ERROR: socket()\n");
-#ifdef _WIN32
-        WSACleanup();
-#endif
-        return 1;
-    }
-#ifndef _WIN32
-    int on = 1;
-    (void)setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
-#endif
+    if (s == SOCK_INVALID) { fprintf(stderr, "[serve] ERROR: socket()\n"); return 1; }
 
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
+    struct sockaddr_in addr; memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     if (!ueng_inet_pton4(host, &addr.sin_addr)) {
-        fprintf(stderr, "[serve] WARN: invalid host '%s', using 127.0.0.1\n", host);
-        ueng_inet_pton4("127.0.0.1", &addr.sin_addr);
-    }
-    addr.sin_port = htons((unsigned short)port);
-
-    if (bind(s, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-        fprintf(stderr, "[serve] ERROR: bind() on %s:%d\n", host, port);
+        fprintf(stderr, "[serve] ERROR: bad host: %s\n", host);
         closesock(s);
 #ifdef _WIN32
         WSACleanup();
 #endif
         return 1;
     }
-    if (listen(s, 16) != 0) {
+    addr.sin_port = htons((unsigned short)port);
+
+    int yes = 1;
+#ifdef _WIN32
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(yes));
+#else
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+#endif
+
+    if (bind(s, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+        fprintf(stderr, "[serve] ERROR: bind() on port %d\n", port);
+        closesock(s);
+#ifdef _WIN32
+        WSACleanup();
+#endif
+        return 1;
+    }
+    if (listen(s, 64) != 0) {
         fprintf(stderr, "[serve] ERROR: listen()\n");
         closesock(s);
 #ifdef _WIN32
@@ -1614,17 +1775,28 @@ static int cmd_serve(int argc, char** argv) {
         return 1;
     }
 
+    /* ensure index + css exists so the site opens nicely */
+    if (!helper_exists_file(root)) (void)mkpath(root);
+    {
+        char html_dir[640]; snprintf(html_dir, sizeof(html_dir), "outputs%c%s%c%s%chtml", PATH_SEP, slug, PATH_SEP, day, PATH_SEP);
+        (void)mkpath(html_dir);
+        char tmp[32]; (void)copy_theme_into_html_dir(html_dir, tmp, sizeof(tmp));
+        if (!helper_exists_file(root)) (void)mkpath(root);
+        if (!helper_exists_file(root) || !helper_exists_file("workspace/cover.svg")) {
+            /* noop */
+            ;
+        }
+    }
+
     printf("[serve] Serving %s at http://%s:%d\n", root, host, port);
-    printf("[serve] Ctrl+C to stop.\n");
 
     for (;;) {
-        struct sockaddr_in cli; socklen_t clilen = (socklen_t)sizeof(cli);
-        sock_t cs = accept(s, (struct sockaddr*)&cli, &clilen);
-        if (cs == SOCK_INVALID) { fprintf(stderr, "[serve] WARN: accept()\n"); continue; }
+        struct sockaddr_in cli; socklen_t cl = (socklen_t)sizeof(cli);
+        sock_t cs = accept(s, (struct sockaddr*)&cli, &cl);
+        if (cs == SOCK_INVALID) continue;
         serve_handle_client(cs, root);
     }
 
-    /* not reached */
     closesock(s);
 #ifdef _WIN32
     WSACleanup();
@@ -1644,34 +1816,23 @@ int main(int argc, char **argv) {
     else if (strcmp(cmd, "build")   == 0) return cmd_build();
     else if (strcmp(cmd, "export")  == 0) return cmd_export();
     else if (strcmp(cmd, "serve")   == 0) return cmd_serve(argc, argv);
+    else if (strcmp(cmd, "doctor")  == 0) return cmd_doctor();
+    else if (strcmp(cmd, "new")     == 0) return cmd_new(argc, argv);
     else if (strcmp(cmd, "publish") == 0) return cmd_publish();
     else if (strcmp(cmd, "--version")==0){ puts("uaengine v0.1"); return 0; }
     else { fprintf(stderr, "Unknown command: %s\n", cmd); usage(); return 1; }
 }
 static void usage(void) {
-    puts("Umicom AuthorEngine AI (uaengine) - Manage your book projects with AI assistance.\n");
+    puts("Umicom AuthorEngine AI (uaengine)\n");
     puts("Usage: uaengine <command> [options]\n");
     puts("Commands:");
-    puts("  init               Initialize a new book project structure.");
-    puts("  ingest             Ingest and organize content from the dropzone.");
-    puts("  build              Build the book draft and prepare outputs.");
-    puts("  export             Export the book to HTML and PDF formats.");
-    puts("  serve [host|dir] [port]  Serve a folder (defaults to today's outputs site).");
-    puts("  publish            Publish the book to a remote server (not implemented).");
-    puts("  --version          Show version information.");
-    puts("\nExamples:");
-    puts("  uaengine init");
-    puts("  uaengine build");
-    puts("  uaengine export");
-    puts("  uaengine serve                (serves outputs/<slug>/<date>/site on 127.0.0.1:8080)");
-    puts("  uaengine serve 8081           (port-only)");
-    puts("  uaengine serve 0.0.0.0 8081   (host + port)");
-    puts("  uaengine serve outputs/my-new-book/2025-09-15/site 9090");
+    puts("  init                Initialize a new book project structure.");
+    puts("  ingest              Ingest and organize content from the dropzone.");
+    puts("  build               Build the book draft and prepare outputs.");
+    puts("  export              Export the book to HTML and PDF formats.");
+    puts("  serve [host] [port] Serve the outputs site (default 127.0.0.1 8080).");
+    puts("  doctor              Check dependencies and write permissions.");
+    puts("  new [title.md]      Create a new chapter in dropzone/chapters.");
+    puts("  publish             Publish the book (not implemented).");
+    puts("  --version           Show version information.");
 }
-
-/*------------------------------ cmd_publish --------------------------------*/
-static int cmd_publish(void) {
-    fprintf(stderr, "[publish] Not implemented yet.\n");
-    return 1;
-}
-/*=========================== COMMANDS ======================================*/
