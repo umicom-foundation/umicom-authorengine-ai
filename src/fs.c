@@ -1,71 +1,75 @@
-#include "ueng/common.h"
-#include "ueng/fs.h"
+/*-----------------------------------------------------------------------------
+ * Umicom AuthorEngine AI (uaengine)
+ * Project: Core CLI + Library-Ready Refactor
+ * Created by: Umicom Foundation (https://umicom.foundation/)
+ * Author: Sammy Hegab + contributors
+ * 
+ * PURPOSE
+ *   This file is part of a refactor that breaks the monolithic main.c into
+ *   small, loosely-coupled modules. The goal is to keep the CLI working today
+ *   while preparing for a reusable library and a GTK4 IDE (Umicom Studio).
+ *
+ * LICENSE
+ *   SPDX-License-Identifier: MIT
+ *---------------------------------------------------------------------------*/
+#include "include/ueng/fs.h"
 
-/* write full file */
-int ueng_write_file(const char* path, const char* content) {
-  FILE* f = ueng_fopen(path, "wb");
-  if (!f) return -1;
-  if (content && *content) fputs(content, f);
-  fclose(f);
-  return 0;
+#ifdef _WIN32
+  #include <windows.h>
+int ingest_walk(const char* abs_dir, const char* rel_dir, StrList* out) {
+  int patn=snprintf(NULL,0,"%s\\*",abs_dir); if(patn<0) return -1;
+  char* pattern=(char*)malloc((size_t)patn+1); if(!pattern) return -1;
+  snprintf(pattern,(size_t)patn+1,"%s\\*",abs_dir);
+  WIN32_FIND_DATAA ffd; HANDLE h=FindFirstFileA(pattern,&ffd);
+  if (h==INVALID_HANDLE_VALUE) { free(pattern); return 0; }
+  int rc=0;
+  do {
+    const char* name=ffd.cFileName;
+    if (!strcmp(name,".")||!strcmp(name,"..")) continue;
+    int need_abs=snprintf(NULL,0,"%s\\%s",abs_dir,name);
+    char* child_abs=(char*)malloc((size_t)need_abs+1); if(!child_abs) { rc=-1; break; }
+    snprintf(child_abs,(size_t)need_abs+1,"%s\\%s",abs_dir,name);
+
+    int need_rel = rel_dir ? snprintf(NULL,0,"%s/%s",rel_dir,name) : (int)strlen(name);
+    char* child_rel=(char*)malloc((size_t)need_rel+1); if(!child_rel) { free(child_abs); rc=-1; break; }
+    if (rel_dir) snprintf(child_rel,(size_t)need_rel+1,"%s/%s",rel_dir,name);
+    else         snprintf(child_rel,(size_t)need_rel+1,"%s",name);
+
+    if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+      rc = ingest_walk(child_abs, child_rel, out);
+    } else {
+      rel_normalize(child_rel);
+      if (sl_push(out, child_rel)!=0) rc=-1;
+    }
+    free(child_abs); free(child_rel);
+    if (rc!=0) break;
+  } while (FindNextFileA(h,&ffd));
+  FindClose(h); free(pattern); return rc;
 }
+#else
+  #include <dirent.h>
+  #include <sys/stat.h>
+int ingest_walk(const char* abs_dir, const char* rel_dir, StrList* out) {
+  DIR* d=opendir(abs_dir); if(!d) return 0; int rc=0; struct dirent* ent;
+  while((ent=readdir(d))) {
+    const char* name=ent->d_name;
+    if (!strcmp(name,".")||!strcmp(name,"..")) continue;
+    int need_abs=snprintf(NULL,0,"%s/%s",abs_dir,name);
+    char* child_abs=(char*)malloc((size_t)need_abs+1); if(!child_abs) { rc=-1; break; }
+    snprintf(child_abs,(size_t)need_abs+1,"%s/%s",abs_dir,name);
 
-/* write only if not present */
-int ueng_write_text_if_absent(const char* path, const char* content) {
-  if (ueng_file_exists(path)) return 0;
-  return ueng_write_file(path, content ? content : "");
-}
+    int need_rel = rel_dir ? snprintf(NULL,0,"%s/%s",rel_dir,name) : (int)strlen(name);
+    char* child_rel=(char*)malloc((size_t)need_rel+1); if(!child_rel) { free(child_abs); rc=-1; break; }
+    if (rel_dir) snprintf(child_rel,(size_t)need_rel+1,"%s/%s",rel_dir,name);
+    else         snprintf(child_rel,(size_t)need_rel+1,"%s",name);
 
-int ueng_append_file(FILE* dst, const char* src_path) {
-  FILE* src = ueng_fopen(src_path, "rb");
-  if (!src) return -1;
-  char buf[64*1024];
-  size_t rd;
-  while ((rd = fread(buf, 1, sizeof(buf), src)) > 0) {
-    size_t wr = fwrite(buf, 1, rd, dst);
-    if (wr != rd) { fclose(src); return -1; }
+    struct stat st; if (lstat(child_abs,&st)==0) {
+      if (S_ISDIR(st.st_mode)) rc = ingest_walk(child_abs, child_rel, out);
+      else if (S_ISREG(st.st_mode)) { rel_normalize(child_rel); if (sl_push(out, child_rel)!=0) rc=-1; }
+    }
+    free(child_abs); free(child_rel);
+    if (rc!=0) break;
   }
-  fclose(src);
-  return 0;
+  closedir(d); return rc;
 }
-
-int ueng_write_gitkeep(const char* dir) {
-  char path[1024];
-  snprintf(path, sizeof(path), "%s%c.gitkeep", dir, PATH_SEP);
-  return ueng_write_text_if_absent(path, "");
-}
-
-/* ensure parent directory exists */
-int ueng_ensure_parent_dir(const char* filepath) {
-  const char* last_sep = NULL;
-  for (const char* p = filepath; *p; ++p) if (*p == PATH_SEP) last_sep = p;
-  if (!last_sep) return 0;
-  size_t n = (size_t)(last_sep - filepath);
-  char* dir = (char*)malloc(n + 1);
-  if (!dir) return -1;
-  memcpy(dir, filepath, n);
-  dir[n] = '\0';
-  int rc = ueng_mkpath(dir);
-  free(dir);
-  return rc;
-}
-
-/* copy (binary) with parents */
-int ueng_copy_file_binary(const char* src, const char* dst) {
-  FILE* in = ueng_fopen(src, "rb");
-  if (!in) return -1;
-  if (ueng_ensure_parent_dir(dst) != 0) { fclose(in); return -1; }
-  FILE* out = ueng_fopen(dst, "wb");
-  if (!out) { fclose(in); return -1; }
-
-  char buf[64*1024];
-  size_t rd;
-  while ((rd = fread(buf, 1, sizeof(buf), in)) > 0) {
-    size_t wr = fwrite(buf, 1, rd, out);
-    if (wr != rd) { fclose(in); fclose(out); return -1; }
-  }
-  fclose(in);
-  fclose(out);
-  return 0;
-}
-
+#endif

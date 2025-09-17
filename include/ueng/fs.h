@@ -1,22 +1,32 @@
+/*-----------------------------------------------------------------------------
+ * Umicom AuthorEngine AI (uaengine)
+ * Project: Core CLI + Library-Ready Refactor
+ * Created by: Umicom Foundation (https://umicom.foundation/)
+ * Author: Sammy Hegab + contributors
+ * 
+ * PURPOSE
+ *   This file is part of a refactor that breaks the monolithic main.c into
+ *   small, loosely-coupled modules. The goal is to keep the CLI working today
+ *   while preparing for a reusable library and a GTK4 IDE (Umicom Studio).
+ *
+ * LICENSE
+ *   SPDX-License-Identifier: MIT
+ *---------------------------------------------------------------------------*/
 #ifndef UENG_FS_H
 #define UENG_FS_H
 
-#include <stdio.h>
-#include <stddef.h>
+#include "common.h"
 
-/* write whole-text file (UTF-8) */
-int  ueng_write_file(const char* path, const char* content);
-/* write if absent (useful for seeds) */
-int  ueng_write_text_if_absent(const char* path, const char* content);
-/* append a whole file into an open stream */
-int  ueng_append_file(FILE* dst, const char* src_path);
-/* create .gitkeep in a directory (if not present) */
-int  ueng_write_gitkeep(const char* dir);
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-/* ensure parent directory of "filepath" exists */
-int  ueng_ensure_parent_dir(const char* filepath);
-/* copy file (binary) creating dirs as needed */
-int  ueng_copy_file_binary(const char* src, const char* dst);
+/* Recursively walk abs_dir; push relative paths (forward slashes) to 'out'.
+   rel_dir may be NULL to start at top-level. */
+int ingest_walk(const char* abs_dir, const char* rel_dir, StrList* out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* UENG_FS_H */
-
