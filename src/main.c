@@ -32,6 +32,8 @@
 #include <ctype.h>
 #include <time.h>
 #include "ueng/version.h"
+#include "ueng/common.h"
+#include "ueng/fs.h"
 
 /*---- Forward declarations --------------------------------------------------*/
 static int  cmd_init(void);
@@ -61,7 +63,7 @@ static int  path_abs(const char* in, char* out, size_t outsz);
 static void path_to_file_url(const char* abs, char* out, size_t outsz);
 
 /*--- Platform-specific includes for directory & sockets --------------------*/
-#ifdef _WIN32
+/*#ifdef _WIN32
   #define WIN32_LEAN_AND_MEAN
   #include <direct.h>
   #include <io.h>
@@ -98,7 +100,7 @@ static void path_to_file_url(const char* abs, char* out, size_t outsz);
     #define FOK F_OK
   #endif
 #endif
-
+*/
 /*----------------------------------------------------------------------------*/
 static int helper_exists_file(const char *path) {
 #ifdef _WIN32
