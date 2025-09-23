@@ -125,6 +125,12 @@ Override explicitly via environment variable:
 
 ---
 
+## Documentation
+- CLI reference: see [docs/CLI.md](docs/CLI.md)
+- Docs index: see [docs/README.md](docs/README.md)
+
+---
+
 ## Folder structure
 
 ```
