@@ -207,7 +207,11 @@ Workflow file: `.github/workflows/build.yml`.
 > Tip: If you want zipped artifacts with neat names (`uaengine-windows.zip`, etc.), add a final “zip + upload” step in the workflow.
 
 ---
-
+### Quality & Security
+- **Code scanning:** This repo runs **CodeQL** on pushes, PRs, and weekly. See the *CodeQL* workflow in Actions.
+- **Formatting:** We ship a `.clang-format` (LLVM base, 2‑space indents, Allman). To format locally:
+  - **Windows (if installed):** `clang-format -i $(git ls-files *.c *.h)` (PowerShell may need a loop)
+  - **Linux/macOS:** `git ls-files '*.c' '*.h' | xargs clang-format -i`
 ## Versioning & Releases
 
 - The CLI reports its version via `--version` (string lives in `include/ueng/version.h`).  
