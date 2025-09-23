@@ -1,64 +1,85 @@
-# uaengine CLI Reference
+# CLI Reference
 
-This document complements `uaengine --help` by expanding examples and behavior.
+This doc lists all commands and flags supported by **uaengine**.
 
-## Global flags
-- `--help` / `-h` – show top-level help
-- `--version` / `-V` – show version (from `include/ueng/version.h`)
+```
+Umicom AuthorEngine AI (uaengine) - Manage your book projects with AI assistance.
+
+Usage: uaengine <command> [options]
+
+Commands:
+  init                 Initialize a new book project structure.
+  ingest               Ingest and organize content from the dropzone.
+  build                Build the book draft and prepare outputs.
+  export               Export the book to HTML and PDF formats.
+  serve [host] [port]  Serve outputs/<slug>/<date>/site over HTTP (default 127.0.0.1 8080).
+  publish              Publish the book to a remote server (not implemented).
+  --version            Show version information.
+```
+
+## Global
+
+- `-h, --help` – Show global usage.
+- `-V, --version` – Print version string.
+
+You can also run `uaengine help <command>`.
 
 ## Commands
 
-### init
-Initialize a new project in the current directory. Creates:
-- `book.yaml`
-- `dropzone/`
-- `workspace/` and `workspace/chapters/`
+### `init`
+Create the initial project structure:
+- `book.yaml` (with default slug `my-new-book`)
+- `dropzone/`, `workspace/` (and `workspace/chapters/`)
 
-Example:
-```powershell
+**Usage**
+```bash
 uaengine init
 ```
 
-### ingest
+### `ingest`
 Copy/normalize Markdown from `dropzone/` into `workspace/chapters/`.
 
-Example:
-```powershell
+**Usage**
+```bash
 uaengine ingest
 ```
 
-### build
-Concatenate chapters into `workspace/book-draft.md` (simple order).
+### `build`
+Concatenate chapters into `workspace/book-draft.md`.
 
-Example:
-```powershell
+**Usage**
+```bash
 uaengine build
 ```
 
-### export
-Produce HTML output in `outputs/<slug>/<YYYY-MM-DD>/html` and a minimal static site in `.../site`.
+### `export`
+Render simple HTML + a tiny static site under `outputs/<slug>/<YYYY-MM-DD>/{html,site}`.
 
-Example:
-```powershell
+**Usage**
+```bash
 uaengine export
 ```
 
-### serve [host] [port]
-Serve the latest site. Defaults to `127.0.0.1 8080`. Uses today’s dated folder unless overridden by `UENG_SITE_ROOT`.
+### `serve`
+Serve the latest site (or the path pointed by `UENG_SITE_ROOT`).
 
-Examples:
+**Usage**
+```bash
+uaengine serve [host] [port]
+# default host 127.0.0.1, default port 8080
+```
+
+Set an explicit site root:
 ```powershell
-uaengine serve
-uaengine serve 0.0.0.0 8081
-# Environment override:
+# Windows
 $env:UENG_SITE_ROOT = "C:\path\to\outputs\my-new-book\2025-09-23\site"
 uaengine serve
 ```
+```bash
+# Linux/macOS
+export UENG_SITE_ROOT="/path/to/outputs/my-new-book/2025-09-23/site"
+uaengine serve
+```
 
-## Exit codes
-- `0` success
-- `>0` error (message printed to stderr / prefixed logs)
-
-## Tips
-- Prefer Ninja builds for speed on CI and locally.
-- On Windows, use the PowerShell scripts under `tools/` for one-liner build/package/install.
+### `publish`
+Reserved for future integrations (no-op today).

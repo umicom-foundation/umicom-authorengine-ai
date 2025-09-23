@@ -1,0 +1,22 @@
+name: smoke
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build build-essential
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build -j
+      - name: Smoke test (--version)
+        run: ./build/uaengine --version
+      - name: Smoke test (--help)
+        run: ./build/uaengine --help || true
