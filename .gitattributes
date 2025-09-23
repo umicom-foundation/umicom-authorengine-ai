@@ -1,4 +1,17 @@
+# Normalize text to LF in repo; convert to CRLF on Windows checkout
 * text=auto
+
+# Keep PowerShell scripts with CRLF on checkout (common on Windows)
+*.ps1 text eol=crlf
+
+# Keep shell scripts as LF
+*.sh  text eol=lf
+
+# Images/binaries
+*.png binary
+*.jpg binary
+*.zip binary
+
 
 # Source & project files use LF in the repo
 *.c      text eol=lf
