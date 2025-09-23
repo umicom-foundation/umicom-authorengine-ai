@@ -9,12 +9,15 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Run($file, [string[]]$args) {
+function Run($file, [string[]]$moreArgs) {
   $here = $PSScriptRoot
   $full = Join-Path $here $file
   if (-not (Test-Path $full)) { throw "Not found: $full" }
-  Write-Host ">> powershell -ExecutionPolicy Bypass -File $file $($args -join ' ')"
-  $p = Start-Process -FilePath "powershell" -ArgumentList @("-ExecutionPolicy","Bypass","-File",$full)+$args -NoNewWindow -Wait -PassThru
+
+  $argList = @('-ExecutionPolicy','Bypass','-File', $full) + $moreArgs
+  Write-Host ">> powershell $($argList -join ' ')"
+
+  $p = Start-Process -FilePath 'powershell' -ArgumentList $argList -NoNewWindow -Wait -PassThru
   if ($p.ExitCode -ne 0) { throw "$file failed with exit code $($p.ExitCode)" }
 }
 
@@ -25,9 +28,10 @@ switch ($Task) {
   'zip'       { Run 'pack.ps1'  @('-Zip') }
   'install'   { Run 'pack.ps1'  @('-InstallToUserBin') }
   'uninstall' { Run 'uninstall.ps1' @() }
-  'vsbuild'   { Run 'build.ps1' @('-Generator','"Visual Studio 17 2022"','-BuildType','Release') }
+  'vsbuild'   { Run 'build.ps1' @('-Generator','Visual Studio 17 2022','-BuildType','Release') }
   'release' {
     if (-not $Arg) { throw "Usage: .\tools\make.ps1 release vX.Y.Z" }
+    # assumes include\ueng\version.h already updated
     git add .\include\ueng\version.h | Out-Null
     git commit -m "version: bump to $Arg" 2>$null | Out-Null
     git push origin main
