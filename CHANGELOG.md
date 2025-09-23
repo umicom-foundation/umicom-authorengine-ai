@@ -1,48 +1,23 @@
 # Changelog
 
-All notable changes to **Umicom AuthorEngine AI (uaengine)** will be documented in this file.
+All notable changes to **uaengine** will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
-
-### Planned
-
-- PDF export pipeline.
-- Richer HTML theming and assets pipeline.
-- CLI ergonomics: `serve --root <dir>`, improved error messages.
-- Library-first refactor for integration with Umicom Studio (GTK4).
-
----
-
-## [v0.1.2] - 2025-09-23
-
+## [v0.1.4] - 2025-09-23
 ### Added
-
-- **GitHub Actions CI** on Windows, Linux, and macOS; uploads build artefacts on every push/PR and attaches binaries to tagged releases.
-- **README.md** overhaul with quick start, build instructions, usage, CI details, and release process.
+- Global and per-command help: `uaengine --help`, `uaengine help <cmd>`, and `<cmd> --help` route to clear usage.
+- Code scanning with **CodeQL** workflow (`.github/workflows/codeql.yml`).
+- `.clang-format` for consistent C style (LLVM base, 2-space, Allman).
 
 ### Changed
-
-- **CMake**: set `_CRT_SECURE_NO_WARNINGS` on Windows via `add_compile_definitions()` to silence noisy UCRT deprecation warnings.
+- README updated with **Quality & Security** section and tools documentation.
+- CI uploads both raw binaries and OS-named zipped artefacts (optional workflow step).
 
 ### Fixed
+- Windows build scripts: robust quoting/argument handling; `pack.ps1` now locates VS multi-config output (`build-vs/Release/uaengine.exe`).
+- Minor portability/cleanup in file-system helpers (case-insensitive extension checks).
 
-- **Windows build**: replaced non-portable `strcasecmp` usage and removed unused helper in `src/fs.c` so it compiles cleanly with Clang/MSVC toolchains.
-- Minor comment cleanup and small portability improvements in file system handling.
+## [v0.1.3] - 2025-09-23
+### Fixed
+- Build reliability on Windows (Ninja + Clang) and CI matrix.
 
----
-
-## [v0.1.1] - 2025-09-22
-
-### Added
-
-- Initial public release of uaengine.
-- Commands: `init`, `ingest`, `build`, `export`, `serve`, and `--version`.
-- Minimal HTML site export with basic CSS theme.
-- Cross-platform CMake project structure.
-
-[Unreleased]: https://github.com/umicom-foundation/umicom-authorengine-ai/compare/v0.1.2...HEAD
-[v0.1.2]: https://github.com/umicom-foundation/umicom-authorengine-ai/releases/tag/v0.1.2
-[v0.1.1]: https://github.com/umicom-foundation/umicom-authorengine-ai/releases/tag/v0.1.1
+*For earlier history, see git log.*
