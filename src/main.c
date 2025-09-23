@@ -30,6 +30,13 @@ static int  cmd_export(void);
 static int  cmd_serve(int argc, char** argv);
 static int  cmd_publish(void);
 static void usage(void);
+static void usage_cmd(const char* cmd);
+static void usage_init(void);
+static void usage_ingest(void);
+static void usage_build(void);
+static void usage_export(void);
+static void usage_serve(void);
+static void usage_publish(void);
 
 /* local helpers kept here for convenience */
 static int  seed_book_yaml(void);
@@ -428,17 +435,78 @@ int main(int argc, char **argv) {
   ueng_console_utf8();
 #endif
   if (argc < 2) { usage(); return 0; }
+
+  /* Global flags */
+  if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
+    usage();
+    return 0;
+  }
+  if (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0) {
+    puts(UENG_VERSION_STRING);
+    return 0;
+  }
+  if (strcmp(argv[1], "help") == 0) {
+    if (argc >= 3) usage_cmd(argv[2]); else usage();
+    return 0;
+  }
+
   const char *cmd = argv[1];
+
+  /* Per-command --help passthroughs to print usage then exit 0 */
+  if ((strcmp(cmd,"init")==0)   && argc>=3 && strcmp(argv[2],"--help")==0)    { usage_init(); return 0; }
+  if ((strcmp(cmd,"ingest")==0) && argc>=3 && strcmp(argv[2],"--help")==0)    { usage_ingest(); return 0; }
+  if ((strcmp(cmd,"build")==0)  && argc>=3 && strcmp(argv[2],"--help")==0)    { usage_build(); return 0; }
+  if ((strcmp(cmd,"export")==0) && argc>=3 && strcmp(argv[2],"--help")==0)    { usage_export(); return 0; }
+  if ((strcmp(cmd,"serve")==0)  && argc>=3 && strcmp(argv[2],"--help")==0)    { usage_serve(); return 0; }
+  if ((strcmp(cmd,"publish")==0)&& argc>=3 && strcmp(argv[2],"--help")==0)    { usage_publish(); return 0; }
+
   if      (strcmp(cmd, "init")    == 0) return cmd_init();
   else if (strcmp(cmd, "ingest")  == 0) return cmd_ingest();
   else if (strcmp(cmd, "build")   == 0) return cmd_build();
   else if (strcmp(cmd, "export")  == 0) return cmd_export();
   else if (strcmp(cmd, "serve")   == 0) return cmd_serve(argc, argv);
   else if (strcmp(cmd, "publish") == 0) return cmd_publish();
-  else if (strcmp(cmd, "--version")==0){ puts(UENG_VERSION_STRING); return 0; }
   else { fprintf(stderr, "Unknown command: %s\n", cmd); usage(); return 1; }
 }
 
+
+
+static void usage_init(void){
+  puts("Usage: uaengine init\n");
+  puts("Initialize a new book project structure (book.yaml, workspace/, dropzone/).");
+}
+static void usage_ingest(void){
+  puts("Usage: uaengine ingest\n");
+  puts("Scan ./dropzone and copy Markdown files into workspace/chapters (normalized).");
+}
+static void usage_build(void){
+  puts("Usage: uaengine build\n");
+  puts("Concatenate workspace/chapters into workspace/book-draft.md.");
+  puts("Respects 'ingest_on_build: true' in book.yaml to run ingest first.");
+}
+static void usage_export(void){
+  puts("Usage: uaengine export\n");
+  puts("Create outputs/<slug>/<YYYY-MM-DD>/{html,site} from the current draft.");
+}
+static void usage_serve(void){
+  puts("Usage: uaengine serve [host] [port]\n");
+  puts("Serve outputs/<slug>/<date>/site over HTTP (default 127.0.0.1 8080).");
+  puts("Env: UENG_SITE_ROOT can point to a specific site folder to serve.");
+}
+static void usage_publish(void){
+  puts("Usage: uaengine publish\n");
+  puts("Placeholder command. Not implemented yet.");
+}
+static void usage_cmd(const char* cmd){
+  if(!cmd){ usage(); return; }
+  if(strcmp(cmd,"init")==0) { usage_init(); return; }
+  if(strcmp(cmd,"ingest")==0){ usage_ingest(); return; }
+  if(strcmp(cmd,"build")==0){ usage_build(); return; }
+  if(strcmp(cmd,"export")==0){ usage_export(); return; }
+  if(strcmp(cmd,"serve")==0){ usage_serve(); return; }
+  if(strcmp(cmd,"publish")==0){ usage_publish(); return; }
+  usage();
+}
 static void usage(void) {
   puts("Umicom AuthorEngine AI (uaengine) - Manage your book projects with AI assistance.\n");
   puts("Usage: uaengine <command> [options]\n");
