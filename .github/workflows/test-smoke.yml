@@ -1,0 +1,67 @@
+name: test-smoke
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build cmake build-essential
+
+      - name: Install deps (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ninja --no-progress
+
+      - name: Configure
+        run: cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Smoke: version/help
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            ./build/uaengine.exe --version
+            ./build/uaengine.exe --help
+            ./build/uaengine.exe help serve
+          else
+            ./build/uaengine --version
+            ./build/uaengine --help
+            ./build/uaengine help serve
+          fi
+
+      - name: Smoke: init/ingest/build/export (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./build/uaengine.exe init
+          Set-Content -NoNewline -Path .\dropzone\intro.md -Value "# Hello`n`nThis is a test."
+          ./build/uaengine.exe ingest
+          ./build/uaengine.exe build
+          ./build/uaengine.exe export
+
+      - name: Smoke: init/ingest/build/export (*nix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          ./build/uaengine init
+          printf "# Hello
+
+This is a test.
+" > ./dropzone/intro.md
+          ./build/uaengine ingest
+          ./build/uaengine build
+          ./build/uaengine export
