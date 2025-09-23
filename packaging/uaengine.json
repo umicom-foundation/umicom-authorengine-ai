@@ -1,0 +1,24 @@
+{
+    "version": "0.1.4",
+    "description": "Umicom AuthorEngine AI (uaengine) – portable CLI to scaffold, build, export, and serve book projects",
+    "homepage": "https://github.com/umicom-foundation/umicom-authorengine-ai",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/umicom-foundation/umicom-authorengine-ai/releases/download/v0.1.4/uaengine-windows.zip",
+            "hash": "<REPLACE_WITH_SHA256>",
+            "extract_dir": "",
+            "bin": "uaengine.exe"
+        }
+    },
+    "checkver": {
+        "github": "https://github.com/umicom-foundation/umicom-authorengine-ai"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/umicom-foundation/umicom-authorengine-ai/releases/download/v$version/uaengine-windows.zip"
+            }
+        }
+    }
+}
