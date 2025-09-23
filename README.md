@@ -23,7 +23,7 @@ Planned: richer HTML theming, PDF export pipeline, and IDE/GUI integration (Umic
 ## Quick start
 
 ### 1) Download a binary (recommended)
-Head to **Releases** and grab the asset for your OS: https://github.com/umicom-foundation/umicom-authorengine-ai/releases
+Grab the latest from **Releases**: https://github.com/umicom-foundation/umicom-authorengine-ai/releases
 
 ### 2) Or build from source
 
@@ -37,9 +37,9 @@ cmake --build build -j
 
 If you prefer Visual Studio:
 ```powershell
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release -j
-.\build\Release\uaengine.exe --version
+cmake -S . -B build-vs -G "Visual Studio 17 2022" -A x64
+cmake --build build-vs --config Release -j
+.\build-vs\Release\uaengine.exe --version
 ```
 
 #### Linux (GCC/Clang + Ninja or Make)
@@ -59,7 +59,7 @@ cmake --build build -j
 ./build/uaengine --version
 ```
 
-> **Note (Windows):** The project sets `_CRT_SECURE_NO_WARNINGS` via CMake to avoid noisy UCRT deprecation warnings. No functional change.
+> **Windows note:** The project sets `_CRT_SECURE_NO_WARNINGS` via CMake to silence noisy UCRT deprecation warnings. No functional change.
 
 ---
 
@@ -88,8 +88,7 @@ Run 'uaengine <command> --help' for command-specific options.
 uaengine init
 
 # 2) Put your Markdown files into .\dropzone\
-#    (example: create a quick one if you like)
-#    Windows:
+#    Example (Windows):
 Set-Content -NoNewline -Path .\dropzone\intro.md -Value "# Hello`n`nThis is a test."
 
 # 3) Ingest -> copies Markdown into workspace/chapters
@@ -141,14 +140,15 @@ Override explicitly via environment variable:
 │  ├─ fs.c
 │  ├─ main.c
 │  └─ serve.c
-├─ dropzone/                 # put raw Markdown here (your input)
+├─ tools/                     # PowerShell helpers (see below)
+├─ dropzone/                  # put raw Markdown here (your input)
 ├─ workspace/
-│  ├─ chapters/              # normalised chapters after 'ingest'
-│  └─ book-draft.md          # created by 'build'
+│  ├─ chapters/               # normalized chapters after 'ingest'
+│  └─ book-draft.md           # created by 'build'
 ├─ outputs/
 │  └─ <slug>/<YYYY-MM-DD>/
-│       ├─ html/             # HTML export
-│       └─ site/             # minimal site (index.html + cover.svg + css)
+│       ├─ html/              # HTML export
+│       └─ site/              # minimal site (index.html + cover.svg + css)
 ├─ .github/workflows/build.yml
 └─ README.md
 ```
@@ -157,20 +157,60 @@ Override explicitly via environment variable:
 
 ---
 
+## Tools (PowerShell)
+
+All helper scripts live in `tools/`:
+
+- `build.ps1` – Configure + build (Ninja by default), then pack and install to `%USERPROFILE%\bin`.  
+  Examples:
+  ```powershell
+  # Ninja, Release, pack + install
+  powershell -ExecutionPolicy Bypass -File .\tools\build.ps1
+
+  # Clean build
+  powershell -ExecutionPolicy Bypass -File .\tools\build.ps1 -Clean
+
+  # Visual Studio generator (separate build dir .\build-vs)
+  powershell -ExecutionPolicy Bypass -File .\tools\build.ps1 -Generator "Visual Studio 17 2022" -BuildDir .\build-vs
+  ```
+- `pack.ps1` – Copy the built `uaengine.exe` into `dist\bin\` (works with Ninja and VS layouts), optional `-Zip`, optional `-InstallToUserBin`.
+- `install.ps1` / `uninstall.ps1` – Add/remove `uaengine.exe` in `%USERPROFILE%\bin` and manage PATH.
+- `make.ps1` – Convenience runner:
+  ```powershell
+  # Build + install (Ninja)
+  powershell -ExecutionPolicy Bypass -File .\tools\make.ps1 build
+
+  # Clean
+  powershell -ExecutionPolicy Bypass -File .\tools\make.ps1 clean
+
+  # Pack and zip
+  powershell -ExecutionPolicy Bypass -File .\tools\make.ps1 zip
+
+  # Visual Studio build to .\build-vs
+  powershell -ExecutionPolicy Bypass -File .\tools\make.ps1 vsbuild
+
+  # Tag a release (assumes version header updated)
+  powershell -ExecutionPolicy Bypass -File .\tools\make.ps1 release vX.Y.Z
+  ```
+
+---
+
 ## Continuous Integration (CI)
 
 This repository builds on every push/PR and on tags **`v*`** across:
 - `windows-latest`, `ubuntu-latest`, `macos-latest`.
 
-Artefacts are uploaded per job. On tag pushes, a GitHub Release is created and artefacts are attached.
+Artifacts are uploaded per job. On tag pushes, a GitHub Release is created and artifacts are attached.
 
 Workflow file: `.github/workflows/build.yml`.
+
+> Tip: If you want zipped artifacts with neat names (`uaengine-windows.zip`, etc.), add a final “zip + upload” step in the workflow.
 
 ---
 
 ## Versioning & Releases
 
-- The CLI reports its version via `--version` (string lives in `include/ueng/version.h`).
+- The CLI reports its version via `--version` (string lives in `include/ueng/version.h`).  
 - To cut a release:
   ```powershell
   # Update include/ueng/version.h to the new version string first
