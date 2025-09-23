@@ -36,3 +36,14 @@
 
 # Local manifest (created by `uaengine init`)
 /book.yaml
+
+# Build outputs
+/build/
+/build-*/
+/dist/
+/workspace/
+/outputs/
+
+# OS/editor
+.DS_Store
+Thumbs.db
