@@ -10,5 +10,5 @@
  *---------------------------------------------------------------------------*/
 #ifndef UENG_VERSION_H
 #define UENG_VERSION_H
-#define UENG_VERSION_STRING "uaengine v0.1"
+#define UENG_VERSION_STRING "uaengine v0.1.2"
 #endif
