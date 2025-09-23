@@ -1,0 +1,34 @@
+# clang-format configuration for uaengine
+# Base style
+BasedOnStyle: LLVM
+
+# Indentation & spacing
+IndentWidth: 2
+TabWidth: 2
+UseTab: Never
+ColumnLimit: 0            # don't hard-wrap; let editors/renderers wrap
+
+# Braces & layout (Allman-like)
+BreakBeforeBraces: Allman
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+
+# Includes
+IncludeBlocks: Regroup
+SortIncludes: true
+
+# Pointers & references
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+# Switch/case indentation
+IndentCaseLabels: true
+
+# Preprocessor
+SpaceAfterCStyleCast: true
+
+# Alignments
+AlignConsecutiveAssignments: Consecutive
+AlignConsecutiveDeclarations: None
+AlignOperands: AlignAfterOperator
