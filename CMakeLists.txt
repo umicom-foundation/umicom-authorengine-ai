@@ -54,3 +54,7 @@ install(
 # Optional starter theme
 install(FILES themes/uae.css DESTINATION ${CMAKE_INSTALL_DATADIR}/uaengine/themes OPTIONAL)
 # Optional example script
+
+enable_testing()
+add_test(NAME uaengine_version
+  COMMAND $<TARGET_FILE:uaengine> --version)

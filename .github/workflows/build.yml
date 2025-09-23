@@ -1,6 +1,5 @@
 name: build
 
-# allow the release job to create GitHub Releases with assets
 permissions:
   contents: write
 
@@ -23,34 +22,37 @@ jobs:
 
       - name: Install deps (Ubuntu)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y ninja-build cmake build-essential
+        run: sudo apt-get update && sudo apt-get install -y ninja-build cmake build-essential zip
 
       - name: Install deps (Windows)
         if: runner.os == 'Windows'
         run: choco install ninja --no-progress
 
-      # macOS runners usually have CMake preinstalled; Ninja is typically present too.
-      # Add a brew step if needed:
-      # - name: Install deps (macOS)
-      #   if: runner.os == 'macOS'
-      #   run: brew install ninja cmake
+      # macOS generally has cmake; ensure zip is present
+      - name: Ensure zip (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          if ! command -v zip >/dev/null 2>&1; then
+            brew install zip || true
+          fi
 
-      - name: Configure
+      - name: Configure (CMake + Ninja)
         run: cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: cmake --build build -j
 
       - name: Smoke test
+        shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
             ./build/uaengine.exe --version
           else
             ./build/uaengine --version
           fi
-        shell: bash
 
-      - name: Package artifact
+      - name: Package artifact (raw binary)
+        shell: bash
         run: |
           mkdir -p dist
           if [ "${{ runner.os }}" = "Windows" ]; then
@@ -58,29 +60,29 @@ jobs:
           else
             cp build/uaengine dist/
           fi
-        shell: bash
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: uaengine-${{ runner.os }}
-          path: dist/
-      - name: Zip artefact
+      - name: Zip artifact (OS-named)
         shell: bash
         run: |
           mkdir -p dist
           if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a uaengine-windows.zip ./build/uaengine.exe
+            7z a uaengine-windows.zip ./build/uaengine.exe > /dev/null
             mv uaengine-windows.zip dist/
           elif [ "${{ runner.os }}" = "macOS" ]; then
-            zip -j uaengine-macos.zip ./build/uaengine
+            zip -j -q uaengine-macos.zip ./build/uaengine
             mv uaengine-macos.zip dist/
           else
-            zip -j uaengine-linux.zip ./build/uaengine
+            zip -j -q uaengine-linux.zip ./build/uaengine
             mv uaengine-linux.zip dist/
           fi
 
-      - name: Upload zipped artefact
+      - name: Upload raw artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: uaengine-${{ runner.os }}
+          path: dist/uaengine*
+
+      - name: Upload zipped artifact
         uses: actions/upload-artifact@v4
         with:
           name: uaengine-${{ runner.os }}-zip
