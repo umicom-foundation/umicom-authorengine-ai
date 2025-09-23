@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 project(uaengine LANGUAGES C)
+# Silence MSVC/UCRT getenv deprecation on Windows across all compilers
+if (WIN32)
+  add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+endif()
 
 # ---- C standard ----
 set(CMAKE_C_STANDARD 17)
