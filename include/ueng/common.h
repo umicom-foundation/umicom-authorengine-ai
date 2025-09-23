@@ -1,16 +1,11 @@
 /*-----------------------------------------------------------------------------
  * Umicom AuthorEngine AI (uaengine)
- * Project: Core CLI + Library-Ready Refactor
+ * File: include/ueng/common.h
+ * Purpose: Platform shims, portable filesystem & string utilities, process exec.
+ *
  * Created by: Umicom Foundation (https://umicom.foundation/)
  * Author: Sammy Hegab + contributors
- * 
- * PURPOSE
- *   This file is part of a refactor that breaks the monolithic main.c into
- *   small, loosely-coupled modules. The goal is to keep the CLI working today
- *   while preparing for a reusable library and a GTK4 IDE (Umicom Studio).
- *
- * LICENSE
- *   SPDX-License-Identifier: MIT
+ * License: MIT
  *---------------------------------------------------------------------------*/
 #ifndef UENG_COMMON_H
 #define UENG_COMMON_H
@@ -18,7 +13,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
 #include <ctype.h>
 #include <errno.h>
 #include <time.h>
@@ -31,62 +25,66 @@
   #define PATH_SEP '\\'
   #define access _access
   #define ACCESS_EXISTS 0
-  static inline int ueng_make_dir(const char* p) { return _mkdir(p); }
+  static inline int make_dir(const char* p){ return _mkdir(p); }
 #else
-  #include <sys/types.h>
   #include <sys/stat.h>
+  #include <sys/types.h>
   #include <unistd.h>
   #define PATH_SEP '/'
   #define ACCESS_EXISTS 0
-  static inline int ueng_make_dir(const char* p) { return mkdir(p, 0755); }
+  static inline int make_dir(const char* p){ return mkdir(p, 0755); }
+#endif
+
+#ifndef PATH_MAX
+  #define PATH_MAX 4096
 #endif
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/*---------------------------- Small utils ----------------------------------*/
+/*------------------------------ String list ---------------------------------*/
 typedef struct {
   char **items;
   size_t count;
   size_t cap;
 } StrList;
 
-void   sl_init(StrList*);
-void   sl_free(StrList*);
-int    sl_push(StrList*, const char* s);
+void   sl_init(StrList* sl);
+void   sl_free(StrList* sl);
+int    sl_push(StrList* sl, const char* s);
+int    qsort_nat_ci_cmp(const void* A, const void* B);
 
-/* FS utils */
-int    helper_exists_file(const char* path);
+/*------------------------------ Filesystem ----------------------------------*/
+int    file_exists(const char* path);
 FILE*  ueng_fopen(const char* path, const char* mode);
-int    mkpath(const char* path);
-int    write_file(const char* path, const char* content);
 int    write_text_file_if_absent(const char* path, const char* content);
-int    append_file(FILE* dst, const char* src_path);
+int    write_file(const char* path, const char* content);
 int    copy_file_binary(const char* src, const char* dst);
-int    clean_dir(const char* dir);
+int    write_gitkeep(const char* dir);
+int    mkpath(const char* path);      /* mkdir -p */
+int    clean_dir(const char* dir);    /* rm -rf children */
 
-/* Strings */
+/*------------------------------ Time/format --------------------------------*/
+void   build_date_utc(char* out, size_t outsz);        /* YYYY-MM-DD */
+void   build_timestamp_utc(char* out, size_t outsz);   /* YYYY-MM-DDThh-mm-ssZ */
+void   slugify(const char* title, char* out, size_t outsz);
+
+/*------------------------------ Strings ------------------------------------*/
 char*  ltrim(char* s);
 void   rtrim(char* s);
 void   unquote(char* s);
-int    ci_cmp(const char* a, const char* b);
-int    natural_ci_cmp(const char* a, const char* b);
-int    endswith_ic(const char* s, const char* suffix);
-void   rel_normalize(char* s);
-void   rel_to_native_sep(char* s);
 
-/* Time / naming */
-void   build_date_utc(char* out, size_t outsz);
-void   build_timestamp_utc(char* out, size_t outsz);
-void   slugify(const char* title, char* out, size_t outsz);
+/*------------------------------ Exec/helpers -------------------------------*/
+int    exec_cmd(const char* cmdline);
+int    path_abs(const char* in, char* out, size_t outsz);
+void   path_to_file_url(const char* abs, char* out, size_t outsz);
 
-/* Minimal YAML helpers */
-int    tiny_yaml_get(const char* filename, const char* key, char* out, size_t outsz);
-int    tiny_yaml_get_bool(const char* filename, const char* key, int* out);
+#ifdef _WIN32
+void   ueng_console_utf8(void);
+#endif
 
 #ifdef __cplusplus
 }
 #endif
-
 #endif /* UENG_COMMON_H */

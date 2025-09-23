@@ -13,6 +13,7 @@ add_executable(uaengine
   src/main.c
   src/common.c
   src/fs.c
+  src/serve.c 
 )
 
 # ---- Includes ----

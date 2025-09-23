@@ -1,32 +1,42 @@
 /*-----------------------------------------------------------------------------
  * Umicom AuthorEngine AI (uaengine)
- * Project: Core CLI + Library-Ready Refactor
+ * File: include/ueng/fs.h
+ * Purpose: Ingestion, normalization, draft packing and simple generators
+ *
  * Created by: Umicom Foundation (https://umicom.foundation/)
  * Author: Sammy Hegab + contributors
- * 
- * PURPOSE
- *   This file is part of a refactor that breaks the monolithic main.c into
- *   small, loosely-coupled modules. The goal is to keep the CLI working today
- *   while preparing for a reusable library and a GTK4 IDE (Umicom Studio).
- *
- * LICENSE
- *   SPDX-License-Identifier: MIT
+ * License: MIT
  *---------------------------------------------------------------------------*/
 #ifndef UENG_FS_H
 #define UENG_FS_H
 
-#include "common.h"
+#include <stddef.h>
+#include "ueng/common.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Recursively walk abs_dir; push relative paths (forward slashes) to 'out'.
-   rel_dir may be NULL to start at top-level. */
-int ingest_walk(const char* abs_dir, const char* rel_dir, StrList* out);
+int  ingest_walk(const char* abs_dir, const char* rel_dir, StrList* out);
+int  normalize_chapters(const char* dropzone);
+
+int  generate_toc_md(const char* book_title);
+int  generate_frontmatter_md(const char* title, const char* author);
+int  generate_acknowledgements_md(const char* author);
+int  generate_cover_svg(const char* title, const char* author, const char* slug);
+int  generate_frontcover_md(const char* title, const char* author, const char* slug);
+int  pack_book_draft(const char* title, const char* outputs_root, int* out_has_draft);
+
+int  copy_theme_into_html_dir(const char* html_dir, char* out_rel_css, size_t outsz);
+int  write_site_index(const char* site_dir,
+                      const char* title,
+                      const char* author,
+                      const char* slug,
+                      const char* stamp,
+                      int has_cover,
+                      int has_draft);
 
 #ifdef __cplusplus
 }
 #endif
-
 #endif /* UENG_FS_H */
