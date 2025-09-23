@@ -126,8 +126,12 @@ Override explicitly via environment variable:
 ---
 
 ## Documentation
-- CLI reference: see [docs/CLI.md](docs/CLI.md)
-- Docs index: see [docs/README.md](docs/README.md)
+
+- **Getting Started** – [docs/Getting-Started.md](docs/Getting-Started.md)  
+- **CLI Reference** – [docs/CLI.md](docs/CLI.md)  
+- **Architecture** – [docs/Architecture.md](docs/Architecture.md)  
+- **Packaging** – [docs/Packaging.md](docs/Packaging.md)  
+- **Contributing Guide** – [docs/Contributing-Guide.md](docs/Contributing-Guide.md)  
 
 ---
 
