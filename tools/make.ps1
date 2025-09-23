@@ -19,16 +19,20 @@ function Run($file, [string[]]$moreArgs) {
 }
 
 switch ($Task) {
+  # Ninja (default) build path
   'build'     { Run 'build.ps1' @() }
   'clean'     { Run 'build.ps1' @('-Clean') }
+
+  # Packaging helpers
   'pack'      { Run 'pack.ps1'  @() }
   'zip'       { Run 'pack.ps1'  @('-Zip') }
   'install'   { Run 'pack.ps1'  @('-InstallToUserBin') }
   'uninstall' { Run 'uninstall.ps1' @() }
 
-  # Pass the generator as a single argument; & preserves spaces correctly
-  'vsbuild'   { Run 'build.ps1' @('-Generator','Visual Studio 17 2022','-BuildType','Release') }
+  # Visual Studio build uses a separate build dir to avoid generator clashes
+  'vsbuild'   { Run 'build.ps1' @('-Generator','Visual Studio 17 2022','-BuildType','Release','-BuildDir','.\\build-vs') }
 
+  # Tag a release at current HEAD (assumes include\ueng\version.h updated)
   'release' {
     if (-not $Arg) { throw "Usage: .\tools\make.ps1 release vX.Y.Z" }
     git add .\include\ueng\version.h | Out-Null
