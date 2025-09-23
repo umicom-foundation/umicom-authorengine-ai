@@ -28,7 +28,10 @@ switch ($Task) {
   'zip'       { Run 'pack.ps1'  @('-Zip') }
   'install'   { Run 'pack.ps1'  @('-InstallToUserBin') }
   'uninstall' { Run 'uninstall.ps1' @() }
-  'vsbuild'   { Run 'build.ps1' @('-Generator','Visual Studio 17 2022','-BuildType','Release') }
+
+  # IMPORTANT: pass the generator as a *single* quoted token so PowerShell treats it as one arg
+  'vsbuild'   { Run 'build.ps1' @('-Generator','"Visual Studio 17 2022"','-BuildType','Release') }
+
   'release' {
     if (-not $Arg) { throw "Usage: .\tools\make.ps1 release vX.Y.Z" }
     # assumes include\ueng\version.h already updated
