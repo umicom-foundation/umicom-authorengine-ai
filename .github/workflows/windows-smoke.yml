@@ -1,0 +1,28 @@
+name: windows-smoke
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build-and-smoke-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ninja
+        run: choco install ninja --no-progress
+
+      - name: Configure (Ninja + Release)
+        run: cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Smoke tests
+        shell: pwsh
+        run: |
+          ./build/uaengine.exe --version
+          ./build/uaengine.exe --help
+          ./build/uaengine.exe help serve
