@@ -1,5 +1,9 @@
 name: build
 
+# allow the release job to create GitHub Releases with assets
+permissions:
+  contents: write
+
 on:
   push:
     branches: [ main ]
@@ -10,8 +14,10 @@ jobs:
   build:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
+
     steps:
       - uses: actions/checkout@v4
 
@@ -19,11 +25,30 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ninja-build cmake build-essential
 
+      - name: Install deps (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ninja --no-progress
+
+      # macOS runners usually have CMake preinstalled; Ninja is typically present too.
+      # Add a brew step if needed:
+      # - name: Install deps (macOS)
+      #   if: runner.os == 'macOS'
+      #   run: brew install ninja cmake
+
       - name: Configure
         run: cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: cmake --build build -j
+
+      - name: Smoke test
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            ./build/uaengine.exe --version
+          else
+            ./build/uaengine --version
+          fi
+        shell: bash
 
       - name: Package artifact
         run: |
