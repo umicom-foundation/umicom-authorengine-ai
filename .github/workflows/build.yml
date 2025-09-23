@@ -28,7 +28,6 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install ninja --no-progress
 
-      # macOS generally has cmake; ensure zip is present
       - name: Ensure zip (macOS)
         if: runner.os == 'macOS'
         run: |

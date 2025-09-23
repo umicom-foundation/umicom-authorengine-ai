@@ -5,10 +5,10 @@ _Date: 2025-09-23_
 
 ## Summary
 This pre-release focuses on developer experience and packaging:
-- Convenience PowerShell tooling under `tools/` (`build.ps1`, `pack.ps1`, `install.ps1`, `uninstall.ps1`, `make.ps1`).
+- PowerShell tooling under `tools/` (`build.ps1`, `pack.ps1`, `install.ps1`, `uninstall.ps1`, `make.ps1`).
 - Visual Studio builds in a separate `build-vs` folder.
-- CI now uploads **raw binaries and zipped artefacts** per OS.
-- Repository hygiene and docs: updated README, CHANGELOG, CONTRIBUTING, SECURITY, issue templates.
+- CI uploads **raw binaries and zipped artefacts** per OS.
+- Repository hygiene and docs: updated README, CONTRIBUTING, SECURITY, issue templates.
 - Optional style guard via `.clang-format` (LLVM base).
 
 ## Highlights
@@ -65,11 +65,9 @@ powershell -ExecutionPolicy Bypass -File .\tools\pack.ps1 -InstallToUserBin
    ```
 
 ## Checksums
-The CI job will attach `.zip` artefacts. Compute checksums locally (example on Windows PowerShell):
+Compute checksums locally (example on Windows PowerShell):
 ```powershell
 Get-FileHash .\dist\uaengine-windows.zip -Algorithm SHA256
 ```
-
----
 
 Thanks for testing! Please file issues with logs and your OS/compiler details.
