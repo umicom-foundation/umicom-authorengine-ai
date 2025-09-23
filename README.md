@@ -1,6 +1,7 @@
 # Umicom AuthorEngine AI (uaengine)
 
 [![build](https://github.com/umicom-foundation/umicom-authorengine-ai/actions/workflows/build.yml/badge.svg)](https://github.com/umicom-foundation/umicom-authorengine-ai/actions/workflows/build.yml)
+[![CodeQL](https://github.com/umicom-foundation/umicom-authorengine-ai/actions/workflows/codeql.yml/badge.svg)](https://github.com/umicom-foundation/umicom-authorengine-ai/actions/workflows/codeql.yml)
 
 A tiny, portable command-line engine to help you turn loose Markdown into a book draft, export basic HTML, and serve a simple site locally. Built in C (C17) with zero heavy dependencies so it compiles fast on Windows, Linux, and macOS.
 
@@ -227,6 +228,7 @@ Workflow file: `.github/workflows/build.yml`.
   git push origin vX.Y.Z
   ```
 - CI will attach built binaries to the GitHub Release for that tag.
+- See [CHANGELOG.md](./CHANGELOG.md) for a summary of changes per version.
 
 ---
 
