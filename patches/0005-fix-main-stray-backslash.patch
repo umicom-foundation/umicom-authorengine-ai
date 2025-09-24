@@ -1,0 +1,10 @@
+diff --git a/src/main.c b/src/main.c
+index 0000000..0000001 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -360,7 +360,7 @@ int cmd_export(/* ... */) {
+       "--resource-path=\"${PWD}:dropzone:workspace\" %s "
+       "-o \"%s\" "
+-      \"workspace/book-draft.md\",
++      \"workspace/book-draft.md\",
+       book_title, author, extra_args, out_html);
