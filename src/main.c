@@ -591,10 +591,12 @@ int main(int argc, char **argv)
    * Author: Sammy Hegab
    * Date: 24-09-2025
    * --------------------------------------------------------------------- */
-  if ((strcmp(argv[1], "--help") == 0) || (strcmp(argv[1], "-h") == 0)) {
+  if ((strcmp(argv[1], "--help") == 0) || (strcmp(argv[1], "-h") == 0)) 
+  {
     usage();
     return 0;
   }
+
   const char *cmd = argv[1];
   if (strcmp(cmd, "help") == 0)
   {
