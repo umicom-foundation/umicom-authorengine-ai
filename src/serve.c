@@ -196,13 +196,13 @@ static void handle_client(ueng_socket_t cs, const char* root){
       rel[j++] = c;
     }
     rel[j] = '\0';
-    do { int n__ = snprintf(fs_path, sizeof(fs_path), "%s%c%s", root, PATH_SEP, rel); if (n__ < 0) break; if ((size_t)n__ >= sizeof(fs_path)) fs_path[sizeof(fs_path)-1] = '\0'; } while (0);
+    snprintf(fs_path, sizeof(fs_path), "%s%c%s", root, PATH_SEP, rel);
   }
 
   /* If not a file but a directory, try directory index fallback */
   if(!file_exists(fs_path) && dir_exists(fs_path)){
     char candidate[PATH_MAX];
-    do { int n__2 = snprintf(candidate, sizeof(candidate), "%s%cindex.html", fs_path, PATH_SEP); if (n__2 < 0) break; if ((size_t)n__2 >= sizeof(candidate)) candidate[sizeof(candidate)-1] = '\0'; } while (0);
+    snprintf(candidate, sizeof(candidate), "%s%cindex.html", fs_path, PATH_SEP);
     if (file_exists(candidate)){
       strcpy(fs_path, candidate);
     }
