@@ -594,7 +594,8 @@ int main(int argc, char **argv)
   if ((strcmp(argv[1], "--help") == 0) || (strcmp(argv[1], "-h") == 0)) {
     usage();
     return 0;
-  }const char *cmd = argv[1];
+  }
+  const char *cmd = argv[1];
   if (strcmp(cmd, "help") == 0)
   {
     usage();
@@ -643,4 +644,3 @@ int main(int argc, char **argv)
     return 1;
   }
 }
-
