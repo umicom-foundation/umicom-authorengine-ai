@@ -25,8 +25,8 @@ int generate_frontcover_md(const char* title, const char* author, const char* sl
 /* cover.svg placed in workspace/ for reuse across export/site. */
 int generate_cover_svg(const char* title, const char* author, const char* slug);
 
-/* Build helpers
-   pack_book_draft: concatenates workspace/chapters/*.md => workspace/book-draft.md */
+/* Build helpers */
+// pack_book_draft: concatenates workspace/chapters/*.md -> workspace/book-draft.md
 int pack_book_draft(const char* title, const char* outputs_root, int* out_has_draft);
 
 /* Theme and site generation

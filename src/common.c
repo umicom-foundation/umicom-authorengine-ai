@@ -7,6 +7,11 @@
  * Author: Sammy Hegab + contributors
  * License: MIT
  *---------------------------------------------------------------------------*/
+#ifndef _WIN32
+#  ifndef _POSIX_C_SOURCE
+#  define _POSIX_C_SOURCE 200809L
+#  endif
+#endif
 #include "ueng/common.h"
 
 #ifdef _WIN32
@@ -20,6 +25,7 @@
   #include <sys/types.h>
   #include <dirent.h>
   #include <unistd.h>
+#include <sys/wait.h>
 #endif
 
 #include <stdio.h>
@@ -83,13 +89,16 @@ static int natcmp_ci(const char* a, const char* b){
       unsigned long long va=0,vb=0; size_t ia=i,jb=j;
       while (isdigit((unsigned char)a[ia])){ va=va*10ULL+(unsigned)(a[ia]-'0'); ia++; }
       while (isdigit((unsigned char)b[jb])){ vb=vb*10ULL+(unsigned)(b[jb]-'0'); jb++; }
-      if (va<vb) return -1; if (va>vb) return 1;
+      if (va<vb) return -1;
+      if (va>vb) return 1;
       i=ia; j=jb; continue;
     }
     unsigned char ta=(unsigned char)tolower(ca);
     unsigned char tb=(unsigned char)tolower(cb);
-    if (ta<tb) return -1; if (ta>tb) return 1;
-    if (ca!='\0') i++; if (cb!='\0') j++;
+    if (ta<tb) return -1;
+    if (ta>tb) return 1;
+    if (ca!='\0') i++;
+    if (cb!='\0') j++;
   }
 }
 int qsort_nat_ci_cmp(const void* A, const void* B){

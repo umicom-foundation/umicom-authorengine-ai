@@ -288,7 +288,7 @@ static int cmd_export(void){
       "-M title=\"%s\" -M author=\"%s\" "
       "--resource-path=\"${PWD}:dropzone:workspace\" %s "
       "-o \"%s\" "
-      \"workspace/book-draft.md\"",
+      ""workspace/book-draft.md"",
       cfg.title, cfg.author,
       rel_css[0] ? "-c \"style.css\"" : "",
       out_html);

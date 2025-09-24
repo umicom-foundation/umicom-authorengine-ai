@@ -183,15 +183,18 @@ int write_site_index(const char* site_dir, const char* title, const char* author
     "<body style=\"margin:2rem auto;max-width:860px;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial,sans-serif;line-height:1.6\">\n"
     "<main>\n<h1>%s</h1>\n<p>Author: %s</p>\n<p><small>%s</small></p>\n",
     title, title, author, stamp);
-  if (n<0) return -1; used += (size_t)n;
+  if (n<0) return -1;
+  used += (size_t)n;
 
   if (has_cover){
     n = snprintf(buf+used, sizeof(buf)-used, "<p><img src=\"../cover/cover.svg\" alt=\"Cover\" style=\"max-width:240px\"></p>\n");
-    if (n<0) return -1; used += (size_t)n;
+    if (n<0) return -1;
+  used += (size_t)n;
   }
   if (has_draft){
     n = snprintf(buf+used, sizeof(buf)-used, "<p><a href=\"%s\">Read HTML Draft</a></p>\n", book_html_rel);
-    if (n<0) return -1; used += (size_t)n;
+    if (n<0) return -1;
+  used += (size_t)n;
   }
 
   n = snprintf(buf+used, sizeof(buf)-used,
