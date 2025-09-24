@@ -23,25 +23,11 @@
   #include <unistd.h>
 #endif
 
-/*------------------------------ String lists --------------------------------*/
-
-void sl_init(StrList* s){ memset(s, 0, sizeof(*s)); }
-void sl_free(StrList* s){
-  if (!s) return;
-  for (size_t i=0;i<s->count;i++) free(s->items[i]);
-  free(s->items);
-  memset(s, 0, sizeof(*s));
-}
-int sl_push(StrList* s, const char* str){
-  if (!str) return -1;
-  char* dup = strdup(str);
-  if (!dup) return -1;
-  char** ni = (char**)realloc(s->items, (s->count+1)*sizeof(char*));
-  if (!ni){ free(dup); return -1; }
-  s->items = ni;
-  s->items[s->count++] = dup;
-  return 0;
-}
+/* NOTE:
+   -----
+   StrList helpers (sl_init/sl_free/sl_push) now live in src/common.c.
+   This file should NOT define them to avoid duplicate symbol link errors.
+*/
 
 /*------------------------------- Theme files --------------------------------*/
 
@@ -213,7 +199,7 @@ int write_site_index(const char* site_dir, const char* title, const char* author
       "</main>\n</body></html>\n");
   if (n<0) return -1;
 
-  /* Minimal, surgical change here: use the function that is implemented in common.c */
+  /* Use the canonical write_text_file from common.c */
   return write_text_file(html, buf);
 }
 /*------------------------------ Path helpers -------------------------------*/
