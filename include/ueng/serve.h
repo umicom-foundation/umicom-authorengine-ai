@@ -9,6 +9,8 @@
 extern "C" {
 #endif
 
+/* Serve files under 'root' (must contain index.html). host: "127.0.0.1", port: 8080.
+   Blocks in the accept loop; Ctrl+C to stop (Windows handler installed). */
 int serve_run(const char* root, const char* host, int port);
 
 #ifdef __cplusplus

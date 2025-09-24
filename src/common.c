@@ -1,7 +1,7 @@
 /*-----------------------------------------------------------------------------
  * Umicom AuthorEngine AI (uaengine)
  * File: src/common.c
- * Purpose: Platform shims, filesystem + string helpers, exec utilities
+ * Purpose: Cross-platform helpers & small utilities
  *
  * Created by: Umicom Foundation (https://umicom.foundation/)
  * Author: Sammy Hegab + contributors
@@ -9,287 +9,334 @@
  *---------------------------------------------------------------------------*/
 #include "ueng/common.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <errno.h>
+#include <time.h>
+#include <sys/stat.h>
+
 #ifdef _WIN32
-  #include <Shlwapi.h>
+  #define WIN32_LEAN_AND_MEAN
+  #include <windows.h>
+  #include <shellapi.h>
+  #include <io.h>
+  #include <direct.h>
+  #ifndef strdup
+    #define strdup _strdup
+  #endif
+  #define ACCESS(p,m) _access(p,m)
+#else
+  #include <unistd.h>
+  #include <dirent.h>
+  #define ACCESS(p,m) access(p,m)
 #endif
 
-/*---------------------------- string list -----------------------------------*/
-void sl_init(StrList* sl){ sl->items=NULL; sl->count=0; sl->cap=0; }
-void sl_free(StrList* sl){
-  if (!sl) return;
-  for (size_t i=0;i<sl->count;i++) free(sl->items[i]);
-  free(sl->items); sl->items=NULL; sl->count=sl->cap=0;
+/*------------------------------ I/O wrappers --------------------------------*/
+/* Thin wrappers so the rest of the app has fewer #ifdefs. */
+
+FILE* ueng_fopen(const char* path, const char* mode){
+  return fopen(path, mode);
 }
-int sl_push(StrList* sl, const char* s){
-  if (sl->count == sl->cap){
-    size_t ncap = sl->cap ? sl->cap*2 : 16;
-    char **p = (char**)realloc(sl->items, ncap * sizeof(char*));
-    if (!p) return -1;
-    sl->items = p; sl->cap = ncap;
+
+int file_exists(const char* path){
+  return (ACCESS(path, ACCESS_EXISTS) == 0) ? 1 : 0;
+}
+
+int dir_exists(const char* path){
+  struct stat st;
+  if (stat(path, &st) != 0) return 0;
+#ifdef _WIN32
+  return (st.st_mode & _S_IFDIR) ? 1 : 0;
+#else
+  return S_ISDIR(st.st_mode) ? 1 : 0;
+#endif
+}
+
+/* mkpath / mkpath_parent create folders like `mkdir -p`. Safe to call repeatedly. */
+static int mkpath_single(const char* path){
+  if (dir_exists(path)) return 0;
+  return make_dir(path) == 0 ? 0 : -1;
+}
+
+int mkpath(const char* path){
+  if (!path || !*path) return 0;
+  char tmp[PATH_MAX];
+  size_t len = strlen(path);
+  if (len >= sizeof(tmp)) return -1;
+  memcpy(tmp, path, len+1);
+
+  /* Walk and create intermediate components. We treat both slashes on Windows. */
+  for (size_t i=1; i<len; ++i){
+#ifdef _WIN32
+    if (tmp[i]=='/' || tmp[i]=='\\'){
+#else
+    if (tmp[i]=='/'){
+#endif
+      char c = tmp[i];
+      tmp[i] = '\0';
+      if (mkpath_single(tmp) != 0) return -1;
+      tmp[i] = c;
+    }
   }
-  size_t n = strlen(s);
-  char *dup = (char*)malloc(n+1);
-  if (!dup) return -1;
-  memcpy(dup, s, n+1);
-  sl->items[sl->count++] = dup;
+  return mkpath_single(tmp);
+}
+
+int mkpath_parent(const char* filepath){
+  if (!filepath || !*filepath) return 0;
+  char buf[PATH_MAX];
+  size_t n = strlen(filepath);
+  if (n >= sizeof(buf)) return -1;
+  memcpy(buf, filepath, n+1);
+
+  /* Chop the last path component and create the dir chain. */
+  char* sep = strrchr(buf, PATH_SEP);
+#ifdef _WIN32
+  char* alt = strrchr(buf, '/');
+  if (alt && (!sep || alt > sep)) sep = alt;
+#endif
+  if (!sep) return 0;
+  *sep = '\0';
+  return mkpath(buf);
+}
+
+int write_text_file(const char* path, const char* text){
+  if (mkpath_parent(path) != 0) return -1;
+  FILE* f = ueng_fopen(path, "wb");
+  if (!f) return -1;
+  /* Write exactly what we're given; the md/html writers own formatting. */
+  fputs(text ? text : "", f);
+  fclose(f);
   return 0;
 }
 
-/* natural, case-insensitive compare for filenames like 2 < 10 */
-static int natural_ci_cmp(const char* a, const char* b){
-  size_t i=0,j=0;
-  for(;;){
-    unsigned char ca=(unsigned char)a[i];
-    unsigned char cb=(unsigned char)b[j];
-    if (ca=='\0' && cb=='\0') return 0;
-    if (isdigit(ca) && isdigit(cb)){
-      unsigned long long va=0,vb=0; size_t ia=i,jb=j;
-      while (isdigit((unsigned char)a[ia])){ va=va*10ULL+(unsigned)(a[ia]-'0'); ia++; }
-      while (isdigit((unsigned char)b[jb])){ vb=vb*10ULL+(unsigned)(b[jb]-'0'); jb++; }
-      if (va<vb) return -1; if (va>vb) return 1;
-      i=ia; j=jb; continue;
+int write_text_file_if_absent(const char* path, const char* text){
+  if (file_exists(path)) return 0;
+  return write_text_file(path, text);
+}
+
+/* Optional convenience used by some call sites */
+int write_file(const char* path, const char* content){
+  return write_text_file(path, content);
+}
+
+/*------------------------------ small utils --------------------------------*/
+/* UTC-only date helpers keep builds reproducible across machines/timezones. */
+
+void build_date_utc(char* out, size_t outsz){
+  time_t now=time(NULL);
+  struct tm* tm=gmtime(&now);
+  strftime(out, outsz, "%Y-%m-%d", tm);
+}
+
+void build_timestamp_utc(char* out, size_t outsz){
+  time_t now=time(NULL);
+  struct tm* tm=gmtime(&now);
+  strftime(out, outsz, "%Y-%m-%dT%H-%M-%SZ", tm);
+}
+
+/* Improved slugify:
+   - Lowercases ASCII letters
+   - Keeps [a-z0-9 _ - +]
+   - Turns everything else into single dashes
+   - Trims leading/trailing dashes */
+void slugify(const char* in, char* out, size_t outsz){
+  size_t j=0; int prev_dash = 0;
+  if (!in || !out || outsz==0){ if (outsz) out[0]='\0'; return; }
+
+  for (size_t i=0; in[i] && j+1<outsz; ++i){
+    unsigned char c=(unsigned char)in[i];
+    if (isalnum(c) || c=='+' || c=='-' || c=='_'){
+      if (c>='A' && c<='Z') c = (unsigned char)(c - 'A' + 'a');
+      out[j++] = (char)c;
+      prev_dash = 0;
+    }else{
+      /* Collapse any run of non-allowed chars into a single dash */
+      if (!prev_dash){
+        out[j++] = '-';
+        prev_dash = 1;
+      }
     }
-    unsigned char ta=(unsigned char)tolower(ca);
-    unsigned char tb=(unsigned char)tolower(cb);
-    if (ta<tb) return -1; if (ta>tb) return 1;
-    if (ca!='\0') i++; if (cb!='\0') j++;
+  }
+  if (j>0 && out[j-1]=='-') j--;  /* strip trailing '-' */
+  out[j] = '\0';
+
+  /* Strip any leading dashes */
+  if (out[0]=='-'){
+    size_t k = 0; while (out[k]=='-') k++;
+    size_t len = strlen(out + k);
+    memmove(out, out + k, len + 1);
   }
 }
+
+/* Tiny string helpers used by the YAML-ish parsing. */
+char* ltrim(char* s){
+  if (!s) return s;
+  while (*s && isspace((unsigned char)*s)) ++s;
+  return s;
+}
+void rtrim(char* s){
+  if (!s) return;
+  size_t n = strlen(s);
+  while (n && isspace((unsigned char)s[n-1])) s[--n]='\0';
+}
+void unquote(char* s){
+  if (!s) return;
+  size_t n = strlen(s);
+  if (n>=2 && ((s[0]=='"' && s[n-1]=='"') || (s[0]=='\'' && s[n-1]=='\''))){
+    memmove(s, s+1, n-2);
+    s[n-2]='\0';
+  }
+}
+
+/* In-place "replace all" helper; safe within a fixed-size buffer. */
+void str_replace_inplace(char* buf, size_t bufsz, const char* pat, const char* rep){
+  if (!buf || !pat || !rep) return;
+  char tmp[65536];
+  size_t blen = strlen(buf), plen=strlen(pat), rlen=strlen(rep);
+  if (blen >= sizeof(tmp)-1) blen = sizeof(tmp)-1;
+
+  const char* s = buf;
+  char* d = tmp;
+  while (*s && (size_t)(d-tmp)+1 < sizeof(tmp)){
+    if (plen && strncmp(s, pat, plen)==0){
+      if ((size_t)(d-tmp) + rlen >= sizeof(tmp)) break;
+      memcpy(d, rep, rlen); d += rlen; s += plen;
+    }else{
+      *d++ = *s++;
+    }
+  }
+  *d = '\0';
+  strncpy(buf, tmp, bufsz-1); buf[bufsz-1]='\0';
+}
+
+/*------------------------- natural sort comparator -------------------------*/
+/* qsort comparator that sorts strings like "ch2" before "ch10" (case-insens.). */
+static int nat_value(const unsigned char** p){
+  int v = 0; int any=0;
+  while (isdigit(**p)){ v = v*10 + (**p - '0'); (*p)++; any=1; }
+  return any ? v : -1;
+}
+
 int qsort_nat_ci_cmp(const void* A, const void* B){
   const char* a = *(const char* const*)A;
   const char* b = *(const char* const*)B;
-  return natural_ci_cmp(a,b);
-}
+  const unsigned char* pa = (const unsigned char*)a;
+  const unsigned char* pb = (const unsigned char*)b;
 
-/*-------------------------------- fs ----------------------------------------*/
-int file_exists(const char* path){
-#ifdef _WIN32
-  return (access(path, 0) == ACCESS_EXISTS) ? 1 : 0;
-#else
-  return (access(path, F_OK) == 0) ? 1 : 0;
-#endif
-}
+  for(;;){
+    if (*pa=='\0' && *pb=='\0') return 0;
+    if (*pa=='\0') return -1;
+    if (*pb=='\0') return  1;
 
-FILE* ueng_fopen(const char* path, const char* mode){
-#ifdef _WIN32
-  FILE* f=NULL;
-  return (fopen_s(&f, path, mode) == 0) ? f : NULL;
-#else
-  return fopen(path, mode);
-#endif
-}
-
-int write_text_file_if_absent(const char* path, const char* content){
-  if (file_exists(path)) { printf("[init] skip (exists): %s\n", path); return 0; }
-  FILE* f = ueng_fopen(path, "wb");
-  if (!f){ fprintf(stderr,"[init] ERROR: cannot open '%s'\n", path); return -1; }
-  if (content && *content) fputs(content, f);
-  fclose(f); printf("[init] wrote: %s\n", path); return 0;
-}
-
-int write_file(const char* path, const char* content){
-  FILE* f = ueng_fopen(path, "wb");
-  if (!f){ fprintf(stderr,"[write] ERROR: cannot open '%s'\n", path); return -1; }
-  if (content && *content) fputs(content, f);
-  fclose(f); return 0;
-}
-
-static int ensure_parent_dir(const char* filepath){
-  const char* last_sep=NULL;
-  for (const char* p=filepath; *p; ++p) if (*p == PATH_SEP) last_sep=p;
-  if (!last_sep) return 0;
-  size_t n = (size_t)(last_sep - filepath);
-  char* dir = (char*)malloc(n+1); if (!dir) return -1;
-  memcpy(dir, filepath, n); dir[n]='\0';
-  int rc = mkpath(dir);
-  free(dir);
-  return rc;
-}
-
-int copy_file_binary(const char* src, const char* dst){
-  FILE* in = ueng_fopen(src, "rb");
-  if (!in){ fprintf(stderr,"[copy] open src fail: %s\n", src); return -1; }
-  if (ensure_parent_dir(dst) != 0){ fclose(in); fprintf(stderr,"[copy] mkpath fail for %s\n", dst); return -1; }
-  FILE* out = ueng_fopen(dst, "wb");
-  if (!out){ fclose(in); fprintf(stderr,"[copy] open dst fail: %s\n", dst); return -1; }
-  char buf[64*1024];
-  size_t rd;
-  while ((rd=fread(buf,1,sizeof(buf),in))>0){
-    size_t wr=fwrite(buf,1,rd,out);
-    if (wr!=rd){ fclose(in); fclose(out); fprintf(stderr,"[copy] short write: %s\n", dst); return -1; }
-  }
-  fclose(in); fclose(out); return 0;
-}
-
-int write_gitkeep(const char* dir){
-  char path[PATH_MAX];
-  snprintf(path, sizeof(path), "%s%c.gitkeep", dir, PATH_SEP);
-  return write_text_file_if_absent(path, "");
-}
-
-/* mkdir -p */
-int mkpath(const char* path){
-  if (!path || !*path) return 0;
-  size_t len = strlen(path);
-  char *buf = (char*)malloc(len+1);
-  if (!buf){ fprintf(stderr,"[mkpath] OOM\n"); return -1; }
-  memcpy(buf, path, len); buf[len]='\0';
-#ifdef _WIN32
-  for (size_t i=0;i<len;++i) if (buf[i]=='/') buf[i]='\\';
-#endif
-  for (size_t i=1;i<len;++i){
-    if (buf[i] == PATH_SEP){
-      char saved = buf[i]; buf[i]='\0';
-      if (!file_exists(buf)){
-        if (make_dir(buf) != 0 && errno != EEXIST){
-          /* ignore; may already exist due to race */
-        }
-      }
-      buf[i]=saved;
+    if (isdigit(*pa) && isdigit(*pb)){
+      const unsigned char* sa=pa; const unsigned char* sb=pb;
+      int va = nat_value(&pa);
+      int vb = nat_value(&pb);
+      if (va != vb) return (va < vb) ? -1 : 1;
+      int la = (int)(pa - sa);
+      int lb = (int)(pb - sb);
+      if (la != lb) return (la < lb) ? -1 : 1;
+      continue;
     }
-  }
-  if (!file_exists(buf)){
-    if (make_dir(buf) != 0 && errno != EEXIST){
-      free(buf); return -1;
-    }
-  }
-  free(buf); return 0;
-}
 
-#ifdef _WIN32
-#include <windows.h>
-static int clean_dir_win(const char* dir){
-  if (!file_exists(dir)) return 0;
-  int rc = 0;
-  char pattern[PATH_MAX];
-  snprintf(pattern, sizeof(pattern), "%s\\*", dir);
-  WIN32_FIND_DATAA ffd;
-  HANDLE h = FindFirstFileA(pattern, &ffd);
-  if (h == INVALID_HANDLE_VALUE) return 0;
-  do {
-    const char* name = ffd.cFileName;
-    if (strcmp(name,".")==0 || strcmp(name,"..")==0) continue;
-    char child[PATH_MAX];
-    snprintf(child, sizeof(child), "%s\\%s", dir, name);
-    if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY){
-      (void)clean_dir_win(child);
-      SetFileAttributesA(child, FILE_ATTRIBUTE_NORMAL);
-      if (!RemoveDirectoryA(child)) rc = -1;
-    }else{
-      SetFileAttributesA(child, FILE_ATTRIBUTE_NORMAL);
-      if (!DeleteFileA(child)) rc = -1;
-    }
-  } while (FindNextFileA(h, &ffd));
-  FindClose(h);
-  return rc;
-}
-int clean_dir(const char* dir){ return clean_dir_win(dir); }
-void ueng_console_utf8(void){ SetConsoleOutputCP(CP_UTF8); }
-#else
-#include <dirent.h>
-#include <sys/stat.h>
-int clean_dir(const char* dir){
-  if (!file_exists(dir)) return 0;
-  DIR* d = opendir(dir);
-  if (!d) return 0;
-  int rc = 0;
-  struct dirent* ent;
-  while ((ent = readdir(d))){
-    const char* name = ent->d_name;
-    if (strcmp(name,".")==0 || strcmp(name,"..")==0) continue;
-    char child[PATH_MAX];
-    snprintf(child, sizeof(child), "%s/%s", dir, name);
-    struct stat st;
-    if (lstat(child, &st) == 0){
-      if (S_ISDIR(st.st_mode)){
-        if (clean_dir(child) != 0) rc = -1;
-        if (rmdir(child) != 0) rc = -1;
-      }else{
-        if (unlink(child) != 0) rc = -1;
-      }
-    }
-  }
-  closedir(d);
-  return rc;
-}
-#endif
-
-/*----------------------------- time/format ----------------------------------*/
-void build_date_utc(char* out, size_t outsz){
-  time_t now=time(NULL);
-  struct tm g;
-#if defined(_WIN32)
-  gmtime_s(&g,&now);
-#else
-  gmtime_r(&now,&g);
-#endif
-  strftime(out,outsz,"%Y-%m-%d",&g);
-}
-void build_timestamp_utc(char* out, size_t outsz){
-  time_t now=time(NULL);
-  struct tm g;
-#if defined(_WIN32)
-  gmtime_s(&g,&now);
-#else
-  gmtime_r(&now,&g);
-#endif
-  strftime(out,outsz,"%Y-%m-%dT%H-%M-%SZ",&g);
-}
-
-char* ltrim(char* s){ while(*s && isspace((unsigned char)*s)) s++; return s; }
-void  rtrim(char* s){
-  size_t n = strlen(s);
-  while (n>0 && isspace((unsigned char)s[n-1])) s[--n] = '\0';
-}
-void  unquote(char* s){
-  size_t n=strlen(s);
-  if (n>=2){
-    char a=s[0], b=s[n-1];
-    if ((a=='"' && b=='"') || (a=='\'' && b=='\'')) { memmove(s,s+1,n-2); s[n-2]='\0'; }
+    unsigned char ca = (unsigned char)tolower(*pa++);
+    unsigned char cb = (unsigned char)tolower(*pb++);
+    if (ca != cb) return (ca < cb) ? -1 : 1;
   }
 }
 
-void slugify(const char* title, char* out, size_t outsz){
-  size_t j=0; int prev_dash=0;
-  for (size_t i=0; title[i] && j+1<outsz; ++i){
-    unsigned char c=(unsigned char)title[i];
-    if (isalnum(c)){ out[j++] = (char)tolower(c); prev_dash=0; }
-    else { if (!prev_dash && j>0){ out[j++]='-'; prev_dash=1; } }
+/*------------------------------- StrList -----------------------------------*/
+void sl_init(StrList* sl){
+  if (!sl) return;
+  sl->items=NULL; sl->count=0; sl->cap=0;
+}
+void sl_free(StrList* sl){
+  if (!sl) return;
+  for (size_t i=0;i<sl->count;++i) free(sl->items[i]);
+  free(sl->items);
+  sl->items=NULL; sl->count=sl->cap=0;
+}
+int sl_push(StrList* sl, const char* s){
+  if (!sl || !s) return -1;
+  if (sl->count == sl->cap){
+    size_t ncap = sl->cap ? sl->cap*2 : 16;
+    char** nitems = (char**)realloc(sl->items, ncap*sizeof(char*));
+    if(!nitems) return -1;
+    sl->items = nitems; sl->cap = ncap;
   }
-  if (j>0 && out[j-1]=='-') j--;
-  out[j]='\0';
-  if (j==0) snprintf(out,outsz,"%s","untitled");
+  sl->items[sl->count] = strdup(s);
+  if (!sl->items[sl->count]) return -1;
+  sl->count++;
+  return 0;
 }
 
-/*------------------------------ exec/helpers --------------------------------*/
+/*----------------------------- shell helpers -------------------------------*/
+/* NOTE: On Windows we treat any nonzero exit as failure. On POSIX we also
+   inspect WEXITSTATUS to propagate the real exit code. */
 int exec_cmd(const char* cmdline){
-  printf("[exec] %s\n", cmdline);
+  if (!cmdline || !*cmdline) return -1;
   int rc = system(cmdline);
-  if (rc != 0) fprintf(stderr,"[exec] command failed (rc=%d)\n", rc);
-  return rc;
-}
 #ifdef _WIN32
-int path_abs(const char* in, char* out, size_t outsz){
-  DWORD n = GetFullPathNameA(in, (DWORD)outsz, out, NULL);
-  return (n>0 && n<outsz) ? 0 : -1;
-}
-void path_to_file_url(const char* abs, char* out, size_t outsz){
-  size_t j=0;
-  const char* pfx="file:///";
-  for (size_t i=0; pfx[i] && j+1<outsz; ++i) out[j++]=pfx[i];
-  for (size_t i=0; abs[i] && j+1<outsz; ++i){
-    char c = abs[i]; if (c=='\\') c='/'; out[j++]=c;
-  }
-  out[j]='\0';
-}
+  if (rc == -1) return -1;
+  return (rc == 0) ? 0 : 1;
 #else
-#include <limits.h>
-#include <unistd.h>
-int path_abs(const char* in, char* out, size_t outsz){
-  char* r = realpath(in, out);
-  return r ? 0 : -1;
+  if (rc == -1) return -1;
+  return (WIFEXITED(rc) && WEXITSTATUS(rc)==0) ? 0 : 1;
+#endif
 }
+
+/* Convert relative to absolute path on both platforms. */
+int path_abs(const char* in, char* out, size_t outsz){
+  if (!in || !*in || !out || outsz==0){ if(outsz) out[0]='\0'; return -1; }
+#ifdef _WIN32
+  DWORD n = GetFullPathNameA(in, (DWORD)outsz, out, NULL);
+  if (!n || n >= outsz){ if(outsz) out[0]='\0'; return -1; }
+  return 0;
+#else
+  char* p = realpath(in, out);
+  if (!p){ if(outsz) out[0]='\0'; return -1; }
+  return 0;
+#endif
+}
+
+/* Turn absolute file path into a file:// URL that browsers can open. */
 void path_to_file_url(const char* abs, char* out, size_t outsz){
+  if (!abs || !out || outsz==0){ if(outsz) out[0]='\0'; return; }
+#ifdef _WIN32
+  char tmp[PATH_MAX]; strncpy(tmp, abs, sizeof(tmp)-1); tmp[sizeof(tmp)-1]='\0';
+  for (char* p=tmp; *p; ++p) if (*p=='\\') *p='/';
+  snprintf(out, outsz, "file:///%s", tmp);
+#else
   snprintf(out, outsz, "file://%s", abs);
+#endif
+}
+
+/* Open local file or URL in the default system browser. */
+int open_in_browser(const char* path_or_url){
+#ifdef _WIN32
+  wchar_t wbuf[1024];
+  MultiByteToWideChar(CP_UTF8, 0, path_or_url, -1, wbuf, 1024);
+  INT_PTR r = (INT_PTR)ShellExecuteW(NULL, L"open", wbuf, NULL, NULL, SW_SHOWNORMAL);
+  return (r > 32) ? 0 : 1;
+#else
+  char cmd[2048];
+  snprintf(cmd,sizeof(cmd),
+           "xdg-open '%s' >/dev/null 2>&1 || open '%s' >/dev/null 2>&1",
+           path_or_url, path_or_url);
+  return exec_cmd(cmd);
+#endif
+}
+
+#ifdef _WIN32
+/* Optional console UTF-8 setup for nicer Windows output. */
+void ueng_console_utf8(void){
+  SetConsoleOutputCP(CP_UTF8);
+  SetConsoleCP(CP_UTF8);
 }
 #endif
+
+/*---------------------------- book.yaml parser -----------------------------*/
+/* (Parsing helpers live in main.c; this file hosts cross-platform utilities.) */
+/*------------------------------ End of file --------------------------------*/
