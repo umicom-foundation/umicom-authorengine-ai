@@ -582,7 +582,19 @@ int main(int argc, char **argv)
     return 0;
   }
 
-  const char *cmd = argv[1];
+  
+  /* -----------------------------------------------------------------------
+   * Accept '--help' / '-h' explicitly and exit 0 (so CI steps never fail
+   * when checking the help text). This is additive and does not change any
+   * existing behavior. 'uaengine help' remains supported below.
+   * Created by: Umicom Foundation (https://umicom.foundation/)
+   * Author: Sammy Hegab
+   * Date: 24-09-2025
+   * --------------------------------------------------------------------- */
+  if ((strcmp(argv[1], "--help") == 0) || (strcmp(argv[1], "-h") == 0)) {
+    usage();
+    return 0;
+  }const char *cmd = argv[1];
   if (strcmp(cmd, "help") == 0)
   {
     usage();
@@ -631,3 +643,4 @@ int main(int argc, char **argv)
     return 1;
   }
 }
+
