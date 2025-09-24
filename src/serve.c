@@ -162,37 +162,70 @@ static void handle_client(ueng_socket_t cs, const char* root){
 #else
   ssize_t rn = recv(cs, req, sizeof(req)-1, 0);
 #endif
-  if(rn <= 0){ closesock(cs); return; }
+  if (rn <= 0)
+  {
+    closesock(cs);
+    return;
+  }
   req[rn] = '\0';
 
   /* Minimal parse: METHOD PATH HTTP/x.y  (we ignore headers for now) */
-  char method[8]={0}, path[2048]={0}, httpver[16]={0};
-  if(sscanf(req, "%7s %2047s %15s", method, path, httpver) != 3){
-    http_send_simple(cs, "400 Bad Request", "400 Bad Request\n"); closesock(cs); return;
+  char method[8] = {0};
+  char path[2048] = {0};
+  char httpver[16] = {0};
+  if (sscanf(req, "%7s %2047s %15s", method, path, httpver) != 3)
+  {
+    http_send_simple(cs, "400 Bad Request", "400 Bad Request\n");
+    closesock(cs);
+    return;
   }
 
   /* Allow only GET and HEAD for this tiny static server */
   int head_only = 0;
-  if(strcmp(method,"GET")==0) head_only = 0;
-  else if(strcmp(method,"HEAD")==0) head_only = 1;
-  else { http_send_simple(cs, "405 Method Not Allowed", "405 Method Not Allowed\n"); closesock(cs); return; }
+  if (strcmp(method, "GET") == 0)
+  {
+    head_only = 0;
+  }
+  else if (strcmp(method, "HEAD") == 0)
+  {
+    head_only = 1;
+  }
+  else
+  {
+    http_send_simple(cs, "405 Method Not Allowed", "405 Method Not Allowed\n");
+    closesock(cs);
+    return;
+  }
 
   /* Guard against directory traversal (../) */
-  if(path_is_traversal(path)) { http_send_simple(cs, "400 Bad Request", "400 Bad Request\n"); closesock(cs); return; }
+  if (path_is_traversal(path))
+  {
+    http_send_simple(cs, "400 Bad Request", "400 Bad Request\n");
+    closesock(cs);
+    return;
+  }
 
   /* Build a filesystem path from root + requested path */
   char fs_path[PATH_MAX];
 
-  if(strcmp(path,"/")==0){
+  if (strcmp(path, "/") == 0)
+  {
     /* Root → serve index.html */
     snprintf(fs_path, sizeof(fs_path), "%s%cindex.html", root, PATH_SEP);
-  } else {
+  }
+  else
+  {
     /* Strip leading '/' and normalize separators */
-    const char* p = path[0]=='/' ? path+1 : path;
-    char rel[PATH_MAX]; size_t j=0;
-    for(size_t i=0; p[i] && j<sizeof(rel)-1; ++i){
+    const char* p = (path[0] == '/') ? (path + 1) : path;
+    char rel[PATH_MAX];
+    size_t j = 0;
+    for (size_t i = 0; p[i] && j < sizeof(rel) - 1; ++i)
+    {
       char c = p[i];
-      if(c=='/') c = PATH_SEP;
+      if (c == '/')
+      {
+        c = PATH_SEP;
+      }
       rel[j++] = c;
     }
     rel[j] = '\0';
@@ -209,9 +242,11 @@ static void handle_client(ueng_socket_t cs, const char* root){
   }
 
   /* If still not found, 404 */
-  if(!file_exists(fs_path)){
+  if (!file_exists(fs_path))
+  {
     http_send_simple(cs, "404 Not Found", "404 Not Found\n");
-    closesock(cs); return;
+    closesock(cs);
+    return;
   }
 
   /* Pick a simple content type from extension and stream the file */
@@ -222,7 +257,10 @@ static void handle_client(ueng_socket_t cs, const char* root){
 
 /* Public entry point: start a blocking HTTP loop that serves 'root'. */
 int serve_run(const char* root, const char* host, int port){
-  if(!root || !*root) return 1;
+  if (!root || !*root)
+  {
+    return 1;
+  }
   if(!dir_exists(root)){
     fprintf(stderr, "[serve] ERROR: site root not found: %s\n", root);
     return 1;
@@ -231,7 +269,7 @@ int serve_run(const char* root, const char* host, int port){
 #ifdef _WIN32
   WSADATA wsa;
   if(WSAStartup(MAKEWORD(2,2), &wsa) != 0){
-    fprintf(stderr,"[serve] ERROR: WSAStartup failed\n");
+    fprintf(stderr, "[serve] ERROR: WSAStartup failed\n");
     return 1;
   }
 #else
