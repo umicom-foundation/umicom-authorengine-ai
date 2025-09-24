@@ -1,0 +1,34 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "CMake: configure (default)",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--preset",
+        "default"
+      ],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "CMake: build (default)",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "build",
+        "-j"
+      ],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Run: uaengine --help",
+      "type": "shell",
+      "command": "${workspaceFolder}/build/uaengine${env:UAENGINE_EXE_EXT} --help",
+      "problemMatcher": []
+    }
+  ]
+}
