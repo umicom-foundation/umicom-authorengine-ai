@@ -29,6 +29,12 @@
       "type": "shell",
       "command": "${workspaceFolder}/build/uaengine${env:UAENGINE_EXE_EXT} --help",
       "problemMatcher": []
+    },
+    {
+      "label": "Format C/C++ (clang-format)",
+      "type": "shell",
+      "command": "git ls-files \"*.c\" \"*.h\" | xargs -r \"${config:clang-format.executable}\" -style=file -i",
+      "problemMatcher": []
     }
   ]
 }
