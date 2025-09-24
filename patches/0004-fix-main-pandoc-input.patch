@@ -1,0 +1,20 @@
+diff --git a/src/main.c b/src/main.c
+index 0000000..0000001 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -281,12 +281,12 @@ int cmd_export(/* args omitted */) {
+     /* Build pandoc command for HTML */
+     snprintf(cmd1, sizeof(cmd1),
+       "pandoc -f markdown -t html5 --standalone "
+-      "-M title=\"%s\" -M author=\"%s\" "
+-      "--resource-path=\"${PWD}:dropzone:workspace\" %s "
+-      "-o \"%s\" "
+-      \"workspace/book-draft.md\",
++      "-M title=\"%s\" -M author=\"%s\" "
++      "--resource-path=\"${PWD}:dropzone:workspace\" %s "
++      "-o \"%s\" "
++      \"workspace/book-draft.md\",
+       book_title, author, extra_args, out_html);
+
+     /* run the command */
+     rc = exec_cmd(cmd1);

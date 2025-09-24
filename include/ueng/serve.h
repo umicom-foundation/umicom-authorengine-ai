@@ -6,12 +6,13 @@
 #ifndef UENG_SERVE_H
 #define UENG_SERVE_H
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
 
-/* Serve files under 'root' (must contain index.html). host: "127.0.0.1", port: 8080.
-   Blocks in the accept loop; Ctrl+C to stop (Windows handler installed). */
-int serve_run(const char* root, const char* host, int port);
+  /* Serve files under 'root' (must contain index.html). host: "127.0.0.1", port: 8080.
+     Blocks in the accept loop; Ctrl+C to stop (Windows handler installed). */
+  int serve_run(const char *root, const char *host, int port);
 
 #ifdef __cplusplus
 }
