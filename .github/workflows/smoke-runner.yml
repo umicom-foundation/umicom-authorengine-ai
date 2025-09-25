@@ -8,12 +8,12 @@ permissions:
   contents: read
 
 env:
-  # Keep cache dirs in the workspace so actions/cache can persist them reliably
   UENG_CACHE_ROOT: ${{ github.workspace }}/.cache
 
 jobs:
   # ------------------------------------------------------------
   # Build & run --version on all OSes using your runner scripts
+  # (Linux/macOS: Ninja + ccache)  (Windows: MSBuild)
   # ------------------------------------------------------------
   smoke-run:
     name: smoke (${{ matrix.os }})
@@ -60,7 +60,6 @@ jobs:
         env:
           CCACHE_DIR: ${{ env.UENG_CACHE_ROOT }}/ccache
         run: |
-          # Tell CMake to use ccache
           cmake -S . -B build-ninja \
             -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
@@ -78,7 +77,7 @@ jobs:
             cmake-build-${{ runner.os }}-${{ github.ref }}-
             cmake-build-${{ runner.os }}-
 
-      # ---------- Windows: MSBuild + cache build dir ----------
+      # ---------- Windows: MSBuild (baseline path) ----------
       - name: Configure + Build (Windows / MSBuild)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -111,18 +110,62 @@ jobs:
           export UENG_RUN_VERBOSE=1
           scripts/run-uaengine.sh -- --version
 
-  # ------------------------------------------------------------------
-  # Optional: OpenAI smoke. Only runs if OPENAI_API_KEY is present.
-  # ------------------------------------------------------------------
-  smoke-run-openai:
-    if: ${{ secrets.OPENAI_API_KEY != '' }}
-    name: smoke-openai (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+  # ------------------------------------------------------------
+  # NEW: Windows Ninja + sccache path (fast build on Windows)
+  # ------------------------------------------------------------
+  smoke-run-win-ninja-sccache:
+    name: smoke (windows-ninja-sccache)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
+      - name: Install Ninja + sccache (Chocolatey)
+        shell: pwsh
+        run: |
+          choco install ninja -y --no-progress
+          choco install sccache -y --no-progress
+
+      - name: Prepare sccache dir
+        shell: pwsh
+        run: |
+          $cache = Join-Path $env:GITHUB_WORKSPACE ".cache\sccache"
+          New-Item -ItemType Directory -Force -Path $cache | Out-Null
+          echo "SCCACHE_DIR=$cache" >> $env:GITHUB_ENV
+          echo "SCCACHE_CACHE_SIZE=2G" >> $env:GITHUB_ENV
+
+      - name: Restore sccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: sccache-win-${{ hashFiles('CMakeLists.txt', 'src/**', 'include/**', 'snippets/**', 'cmake/**') }}
+          restore-keys: |
+            sccache-win-
+
+      - name: Configure + Build (Ninja + sccache)
+        shell: pwsh
+        run: |
+          cmake -S . -B build-ninja -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache `
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          cmake --build build-ninja -j
+          sccache --show-stats || $true
+
+      - name: Run — --version via runner
+        shell: pwsh
+        run: |
+          $env:UENG_RUN_VERBOSE="1"
+          powershell -ExecutionPolicy Bypass -File scripts\run-uaengine.ps1 -- --version
+
+  # ------------------------------------------------------------------
+  # Optional: OpenAI smoke (Linux + Windows Ninja/sccache).
+  # Runs only if OPENAI_API_KEY is present.
+  # ------------------------------------------------------------------
+  smoke-run-openai-linux:
+    if: ${{ secrets.OPENAI_API_KEY != '' }}
+    name: smoke-openai (linux)
+    runs-on: ubuntu-latest
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       UENG_LLM_PROVIDER: openai
@@ -132,30 +175,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Linux: Ninja + ccache + OpenAI
-      - name: Install Ninja & ccache (Linux)
-        if: runner.os == 'Linux'
+      - name: Install Ninja & ccache
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build ccache
 
-      - name: Prepare ccache directory (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          mkdir -p "${UENG_CACHE_ROOT}/ccache"
+      - name: Prepare ccache
+        run: mkdir -p "${UENG_CACHE_ROOT}/ccache"
 
-      - name: Restore ccache (Linux)
-        if: runner.os == 'Linux'
+      - name: Restore ccache
         uses: actions/cache@v4
         with:
           path: ${{ env.UENG_CACHE_ROOT }}/ccache
-          key: ccache-openai-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'src/**', 'include/**', 'snippets/**', 'cmake/**') }}
+          key: ccache-openai-linux-${{ hashFiles('CMakeLists.txt', 'src/**', 'include/**', 'snippets/**', 'cmake/**') }}
           restore-keys: |
-            ccache-openai-${{ runner.os }}-
+            ccache-openai-linux-
 
-      - name: Configure + Build (Linux / Ninja + OpenAI)
-        if: runner.os == 'Linux'
-        shell: bash
+      - name: Configure + Build (Ninja + OpenAI)
         env:
           CCACHE_DIR: ${{ env.UENG_CACHE_ROOT }}/ccache
         run: |
@@ -166,31 +202,62 @@ jobs:
           cmake --build build-ninja -j
           ccache -s || true
 
-      - name: Configure + Build (Windows / MSBuild + OpenAI)
-        if: runner.os == 'Windows'
+      - name: Run — llm-selftest (OpenAI)
+        run: scripts/run-uaengine.sh llm-selftest gpt-4o-mini
+
+  smoke-run-openai-win-ninja-sccache:
+    if: ${{ secrets.OPENAI_API_KEY != '' }}
+    name: smoke-openai (windows-ninja-sccache)
+    runs-on: windows-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      UENG_LLM_PROVIDER: openai
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Ninja + sccache
         shell: pwsh
         run: |
-          cmake -S . -B build -DUAENG_ENABLE_OPENAI=ON
-          cmake --build build -j
+          choco install ninja -y --no-progress
+          choco install sccache -y --no-progress
 
-      - name: Run (Windows) — llm-selftest (OpenAI)
-        if: runner.os == 'Windows'
+      - name: Prepare sccache dir
+        shell: pwsh
+        run: |
+          $cache = Join-Path $env:GITHUB_WORKSPACE ".cache\sccache"
+          New-Item -ItemType Directory -Force -Path $cache | Out-Null
+          echo "SCCACHE_DIR=$cache" >> $env:GITHUB_ENV
+          echo "SCCACHE_CACHE_SIZE=2G" >> $env:GITHUB_ENV
+
+      - name: Restore sccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: sccache-win-openai-${{ hashFiles('CMakeLists.txt', 'src/**', 'include/**', 'snippets/**', 'cmake/**') }}
+          restore-keys: |
+            sccache-win-openai-
+
+      - name: Configure + Build (Ninja + sccache + OpenAI)
+        shell: pwsh
+        run: |
+          cmake -S . -B build-ninja -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DUAENG_ENABLE_OPENAI=ON `
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache `
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          cmake --build build-ninja -j
+          sccache --show-stats || $true
+
+      - name: Run — llm-selftest (OpenAI)
         shell: pwsh
         run: |
           powershell -ExecutionPolicy Bypass -File scripts\run-uaengine.ps1 -- llm-selftest gpt-4o-mini
 
-      - name: Run (Linux) — llm-selftest (OpenAI)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          scripts/run-uaengine.sh llm-selftest gpt-4o-mini
-
   # ------------------------------------------------------------------
-  # Optional: Ollama smoke (Docker). Enable using repo variable:
-  # Settings → Actions → Variables → New variable:
-  #   Name: UENG_ENABLE_OLLAMA_SMOKE   Value: true
-  #
-  # Caches the tiny model via actions/cache by bind-mounting a host dir.
+  # Optional: Ollama smoke (Docker) with cached model
+  # Enable via repo variable: UENG_ENABLE_OLLAMA_SMOKE=true
   # ------------------------------------------------------------------
   smoke-run-ollama:
     if: ${{ vars.UENG_ENABLE_OLLAMA_SMOKE == 'true' }}
@@ -211,23 +278,20 @@ jobs:
           sudo apt-get install -y ninja-build jq curl
 
       - name: Prepare model cache dir
-        run: |
-          mkdir -p "${OLLAMA_CACHE_DIR}"
+        run: mkdir -p "${OLLAMA_CACHE_DIR}"
 
       - name: Restore Ollama model cache
         uses: actions/cache@v4
         with:
           path: ${{ env.OLLAMA_CACHE_DIR }}
           key: ollama-models-tinyllama
-          restore-keys: |
-            ollama-models-
+          restore-keys: ollama-models-
 
       - name: Start Ollama (Docker with model bind-mount)
         run: |
           docker run -d --name ollama -p 11434:11434 \
             -v "${OLLAMA_CACHE_DIR}:/root/.ollama" \
             ollama/ollama:latest
-          # Wait for API to come up
           for i in {1..60}; do
             if curl -fsS http://localhost:11434/api/tags >/dev/null; then
               echo "Ollama is up"; break
@@ -236,8 +300,7 @@ jobs:
           done
 
       - name: Pull tiny model (cached)
-        run: |
-          docker exec ollama ollama pull tinyllama
+        run: docker exec ollama ollama pull tinyllama
 
       - name: Configure + Build (Ninja + OLLAMA)
         run: |
@@ -252,8 +315,7 @@ jobs:
 
       - name: Docker logs (on failure)
         if: failure()
-        run: |
-          docker logs ollama || true
+        run: docker logs ollama || true
 
       - name: Save Ollama model cache
         if: always()
@@ -264,5 +326,4 @@ jobs:
 
       - name: Cleanup Docker
         if: always()
-        run: |
-          docker rm -f ollama || true
+        run: docker rm -f ollama || true
