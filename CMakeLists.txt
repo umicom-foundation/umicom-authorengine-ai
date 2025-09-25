@@ -92,6 +92,10 @@ set(UAENG_SOURCES
 )
 
 add_executable(uaengine ${UAENG_SOURCES})
+# Silence C4702 (unreachable code) only for src/serve.c on MSVC.
+if (MSVC)
+  set_source_files_properties(src/serve.c PROPERTIES COMPILE_FLAGS "/wd4702")
+endif()
 
 # ------------------------------- Linking --------------------------------------
 if(WIN32)
