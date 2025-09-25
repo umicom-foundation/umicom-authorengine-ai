@@ -19,6 +19,17 @@ add_executable(uaengine
   src/fs.c
   src/serve.c 
 )
+# -----------------------------------------------------------------------------
+# Put runtime (exe) directly under the build directory for all VS configs
+# -----------------------------------------------------------------------------
+set_target_properties(uaengine PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY               "${CMAKE_BINARY_DIR}"
+  RUNTIME_OUTPUT_DIRECTORY_DEBUG         "${CMAKE_BINARY_DIR}"
+  RUNTIME_OUTPUT_DIRECTORY_RELEASE       "${CMAKE_BINARY_DIR}"
+  RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}"
+  RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL    "${CMAKE_BINARY_DIR}"
+)
+
 # Make sure public headers are visible
 include_directories(${CMAKE_SOURCE_DIR}/include)
 include(cmake/providers.cmake)
