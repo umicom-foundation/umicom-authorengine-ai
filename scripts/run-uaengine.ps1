@@ -1,46 +1,53 @@
-<# -----------------------------------------------------------------------------
- Umicom AuthorEngine AI (uaengine) - Windows runner helper (PowerShell)
-
- PURPOSE:
-   - Robustly locates a built 'uaengine(.exe)' in common build folders.
-   - If not found and UENG_RUN_AUTOBUILD=1 is set, it will configure+build
-     using either Ninja (if available) or the default MSBuild generator.
-   - Passes all remaining arguments through to the binary.
-
- USAGE:
-   powershell -ExecutionPolicy Bypass -File scripts\run-uaengine.ps1 -- --version
-   powershell -ExecutionPolicy Bypass -File scripts\run-uaengine.ps1 -- llm-selftest gpt-4o-mini
-
- ENV:
-   UENG_RUN_VERBOSE=1    -> prints extra diagnostics
-   UENG_RUN_AUTOBUILD=1  -> tries to build if the binary is missing
-
- Created by: Umicom Foundation (https://umicom.foundation/)
- Author: Sammy Hegab
- Date: 25-09-2025
- License: MIT
------------------------------------------------------------------------------ #>
+# ------------------------------------------------------------------------------
+# Umicom AuthorEngine AI (uaengine) - Runner helper (PowerShell)
+#
+# PURPOSE:
+#   - Robustly locates a built 'uaengine(.exe)' in common build folders.
+#   - If not found and UENG_RUN_AUTOBUILD=1 is set, configure+build with CMake:
+#       * Uses Ninja if available, otherwise default (Visual Studio) generator.
+#   - Forwards all remaining arguments to the binary (preserving quoting).
+#
+# USAGE:
+#   powershell -ExecutionPolicy Bypass -File scripts\run-uaengine.ps1 -- --version
+#   $env:UENG_RUN_AUTOBUILD="1"; scripts\run-uaengine.ps1 -- llm-selftest gpt-4o-mini
+#
+# ENV:
+#   UENG_RUN_VERBOSE=1    -> extra diagnostics
+#   UENG_RUN_AUTOBUILD=1  -> configure+build if 'uaengine' is missing
+#   UAENG_CMAKE_FLAGS     -> extra cmake flags, e.g.:
+#                            -DUAENG_ENABLE_OPENAI=ON -DUAENG_ENABLE_OLLAMA=ON
+#   CMAKE_BUILD_TYPE      -> used when Ninja is selected (default: Release)
+#   CC / CXX              -> honored during autobuild (if set)
+#
+# NOTES:
+#   - We resolve the script directory robustly, even if $PSCommandPath is null
+#     (older hosts or unusual invocations).
+#
+# Project notes (paste any legacy header/comments you want to preserve here):
+#   - Created by: Umicom Foundation (https://umicom.foundation/)
+#   - Author: Sammy Hegab
+#   - Date: 25-09-2025
+#   - License: MIT
+# ------------------------------------------------------------------------------
 
 param(
-  [Parameter(ValueFromRemainingArguments=$true)]
-  [string[]] $Args
+  [Parameter(ValueFromRemainingArguments = $true)]
+  [string[]]$Rest
 )
 
-# ------------------------------ Helpers ---------------------------------------
-function Write-Info($msg)  { if ($env:UENG_RUN_VERBOSE) { Write-Host "[run] $msg" } }
-function Write-ErrorBlock($title, $lines) {
-  Write-Host "[run] ERROR: $title" -ForegroundColor Red
-  if ($lines) { $lines | ForEach-Object { Write-Host $_ } }
+function Log($msg) {
+  if ($env:UENG_RUN_VERBOSE -eq "1") { Write-Host "[run] $msg" }
 }
 
-# Resolve script directory in a way that works even when PSCommandPath is null.
-$ScriptDir = $PSScriptRoot
-if (-not $ScriptDir -or $ScriptDir -eq '') {
-  $ScriptDir = Split-Path -Path $MyInvocation.MyCommand.Path -Parent
-}
-$RepoRoot = Split-Path -Path $ScriptDir -Parent
+# --- Resolve script path & repo root (robustly) --------------------------------
+$ScriptPath = $PSCommandPath
+if (-not $ScriptPath -or $ScriptPath -eq "") { $ScriptPath = $MyInvocation.MyCommand.Path }
+if (-not $ScriptPath -or $ScriptPath -eq "") { $ScriptPath = (Join-Path (Get-Location) "scripts\run-uaengine.ps1") }
 
-# Candidate locations (Debug/Release/Ninja/single-config).
+$ScriptDir = Split-Path -Path $ScriptPath -Parent
+$RepoRoot  = Split-Path -Path $ScriptDir  -Parent
+
+# --- Candidate locations (common build outputs) --------------------------------
 $candidates = @(
   (Join-Path $RepoRoot "build\uaengine.exe"),
   (Join-Path $RepoRoot "build\Debug\uaengine.exe"),
@@ -49,79 +56,81 @@ $candidates = @(
 )
 
 function Find-Uaengine {
-  foreach ($c in $candidates) {
-    if (Test-Path $c) { return $c }
+  foreach ($p in $candidates) {
+    if (Test-Path $p) { return $p }
   }
   return $null
 }
 
-# Try to find an existing binary.
+# Split arguments after '--' to avoid PowerShell re-parsing user args.
+$dashdashIndex = $Rest.IndexOf('--')
+if ($dashdashIndex -ge 0) {
+  $pass = $Rest[($dashdashIndex + 1)..($Rest.Count - 1)]
+} else {
+  $pass = $Rest
+}
+
 $exe = Find-Uaengine
 if ($exe) {
-  Write-Info "Found uaengine: $exe"
-  & $exe @Args
+  Log "Found uaengine: $exe"
+  & $exe @pass
   exit $LASTEXITCODE
 }
 
-# Optionally attempt to (auto)build if requested by env flag.
-if ($env:UENG_RUN_AUTOBUILD -eq '1') {
-  Write-Info "uaengine not found; attempting autobuild..."
+# --- Optional autobuild --------------------------------------------------------
+if ($env:UENG_RUN_AUTOBUILD -eq "1") {
+  Log "uaengine not found; attempting autobuild…"
 
-  # Prefer Ninja if available.
-  $ninja = $null
-  try { $ninja = (Get-Command ninja.exe -ErrorAction Stop).Source } catch {}
-
-  if ($ninja) {
-    Write-Info "Using Ninja at: $ninja"
-    # If LLVM/Clang is present, use it; otherwise let CMake default to MSVC.
-    $clang   = "C:\Program Files\LLVM\bin\clang.exe"
-    $clangxx = "C:\Program Files\LLVM\bin\clang++.exe"
-
-    if (Test-Path $clang -and Test-Path $clangxx) {
-      & cmake -S $RepoRoot -B (Join-Path $RepoRoot "build-ninja") -G Ninja `
-        -D CMAKE_BUILD_TYPE=Release `
-        -D CMAKE_MAKE_PROGRAM="$ninja" `
-        -D CMAKE_C_COMPILER="$clang" `
-        -D CMAKE_CXX_COMPILER="$clangxx"
-    } else {
-      & cmake -S $RepoRoot -B (Join-Path $RepoRoot "build-ninja") -G Ninja `
-        -D CMAKE_BUILD_TYPE=Release `
-        -D CMAKE_MAKE_PROGRAM="$ninja"
-    }
-    if ($LASTEXITCODE -ne 0) { Write-ErrorBlock "CMake configure (Ninja) failed." $null; exit 1 }
-    & cmake --build (Join-Path $RepoRoot "build-ninja") -j
-    if ($LASTEXITCODE -ne 0) { Write-ErrorBlock "CMake build (Ninja) failed." $null; exit 1 }
-  }
-  else {
-    Write-Info "Ninja not found; using MSBuild generator."
-    & cmake -S $RepoRoot -B (Join-Path $RepoRoot "build")
-    if ($LASTEXITCODE -ne 0) { Write-ErrorBlock "CMake configure (MSBuild) failed." $null; exit 1 }
-    & cmake --build (Join-Path $RepoRoot "build") -j
-    if ($LASTEXITCODE -ne 0) { Write-ErrorBlock "CMake build (MSBuild) failed." $null; exit 1 }
+  $haveNinja = (Get-Command ninja -ErrorAction SilentlyContinue) -ne $null
+  if ($haveNinja) {
+    Log "Using Ninja generator"
+    $buildDir = Join-Path $RepoRoot "build-ninja"
+    $cmakeArgs = @("-S", $RepoRoot, "-B", $buildDir, "-G", "Ninja",
+                   "-D", "CMAKE_BUILD_TYPE=$($env:CMAKE_BUILD_TYPE ?? 'Release')")
+  } else {
+    Log "Ninja not found; using default CMake generator"
+    $buildDir = Join-Path $RepoRoot "build"
+    $cmakeArgs = @("-S", $RepoRoot, "-B", $buildDir)
   }
 
-  # Try again to resolve the binary.
+  # Honor CC/CXX if provided (CMake expects compilers at configure time)
+  if ($env:CC)  { $cmakeArgs += @("-D", "CMAKE_C_COMPILER=$($env:CC)") }
+  if ($env:CXX) { $cmakeArgs += @("-D", "CMAKE_CXX_COMPILER=$($env:CXX)") }
+
+  # Append user flags (space-separated)
+  if ($env:UAENG_CMAKE_FLAGS) {
+    $cmakeArgs += $env:UAENG_CMAKE_FLAGS.Split(' ')
+  }
+
+  Log ("cmake " + ($cmakeArgs -join ' '))
+  $p = Start-Process cmake -ArgumentList $cmakeArgs -NoNewWindow -PassThru -Wait
+  if ($p.ExitCode -ne 0) {
+    Write-Error "[run] CMake configure failed."; exit $p.ExitCode
+  }
+
+  $p = Start-Process cmake -ArgumentList @("--build", $buildDir, "-j") -NoNewWindow -PassThru -Wait
+  if ($p.ExitCode -ne 0) {
+    Write-Error "[run] CMake build failed."; exit $p.ExitCode
+  }
+
   $exe = Find-Uaengine
   if ($exe) {
-    Write-Info "Autobuild produced: $exe"
-    & $exe @Args
+    Log "Autobuild produced: $exe"
+    & $exe @pass
     exit $LASTEXITCODE
   }
 }
 
-# If we’re still here, we couldn’t find (or build) the binary.
-Write-ErrorBlock "could not find 'uaengine' in expected build folders." @(
-  "Tried:", ("  " + ($candidates -join "`n  ")), "",
-  "Hints:",
-  "  1) Build with MSBuild (Visual Studio generator):",
-  "       cmake -S . -B build",
-  "       cmake --build build -j",
-  "     The binary will be in 'build\\Debug\\uaengine.exe' (or Release).",
-  "",
-  "  2) Build with Ninja:",
-  "       cmake -S . -B build-ninja -G Ninja -DCMAKE_BUILD_TYPE=Release",
-  "       cmake --build build-ninja -j",
-  "     The binary will be in 'build-ninja\\uaengine.exe'."
-)
+# --- Friendly guidance ---------------------------------------------------------
+Write-Host "[run] ERROR: could not find 'uaengine.exe' in expected locations." -ForegroundColor Red
+Write-Host "Tried:"; $candidates | ForEach-Object { Write-Host "  $_" }
+Write-Host ""
+Write-Host "Hints:"
+Write-Host "  1) Default (Visual Studio generator):"
+Write-Host "       cmake -S . -B build"
+Write-Host "       cmake --build build -j"
+Write-Host "     Binary is typically: build\Debug\uaengine.exe (or Release)"
+Write-Host "  2) Ninja:"
+Write-Host "       cmake -S . -B build-ninja -G Ninja -DCMAKE_BUILD_TYPE=Release"
+Write-Host "       cmake --build build-ninja -j"
 exit 1
-# End of script

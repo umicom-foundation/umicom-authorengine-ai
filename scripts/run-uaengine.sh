@@ -17,8 +17,8 @@
 #   UENG_RUN_AUTOBUILD=1  -> tries to build if the binary is missing
 #   CMAKE_BUILD_TYPE      -> defaults to Release for Ninja configure
 #   CC / CXX              -> honored during autobuild if set
-#   UAENG_CMAKE_FLAGS     -> extra cmake flags (space-separated), e.g.:
-#                            UAENG_CMAKE_FLAGS="-DUAENG_ENABLE_OPENAI=ON -DUAENG_ENABLE_OLLAMA=ON"
+#   UAENG_CMAKE_FLAGS     -> extra cmake flags, e.g.:
+#                            -DUAENG_ENABLE_OPENAI=ON -DUAENG_ENABLE_OLLAMA=ON
 #
 # Created by: Umicom Foundation (https://umicom.foundation/)
 # Author: Sammy Hegab
@@ -26,14 +26,11 @@
 # License: MIT
 # ------------------------------------------------------------------------------
 
-# We avoid `set -e` to print friendlier errors. We still treat unset vars carefully.
 set -u
 
-# ------------------------------ Helpers ---------------------------------------
 log() { if [ "${UENG_RUN_VERBOSE:-0}" = "1" ]; then echo "[run] $*"; fi; }
 
-# Resolve script and repo directories portably (works for symlinks too).
-# NOTE: We keep this simple and reliable across Linux & macOS.
+# Resolve script + repo directories portably
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
@@ -55,7 +52,6 @@ find_uaengine() {
   return 1
 }
 
-# ------------------------------- Run flow -------------------------------------
 EXE="$(find_uaengine || true)"
 if [ -n "${EXE:-}" ]; then
   log "Found uaengine: $EXE"
@@ -69,7 +65,6 @@ if [ "${UENG_RUN_AUTOBUILD:-0}" = "1" ]; then
   if command -v ninja >/dev/null 2>&1; then
     log "Using Ninja generator"
     BUILD_DIR="${REPO_ROOT}/build-ninja"
-    # Base configure args
     CMAKE_ARGS=(-S "${REPO_ROOT}" -B "${BUILD_DIR}" -G Ninja -D CMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-Release}")
   else
     log "Ninja not found; using default CMake generator"
@@ -77,13 +72,13 @@ if [ "${UENG_RUN_AUTOBUILD:-0}" = "1" ]; then
     CMAKE_ARGS=(-S "${REPO_ROOT}" -B "${BUILD_DIR}")
   fi
 
-  # Honor CC/CXX if provided by the environment
+  # Honor CC/CXX if provided
   if [ -n "${CC:-}"  ]; then CMAKE_ARGS+=( -D CMAKE_C_COMPILER="${CC}" );  fi
   if [ -n "${CXX:-}" ]; then CMAKE_ARGS+=( -D CMAKE_CXX_COMPILER="${CXX}" ); fi
 
-  # Pass-through extra flags, e.g., provider feature toggles
+  # Pass-through extra flags
   if [ -n "${UAENG_CMAKE_FLAGS:-}" ]; then
-    # shellcheck disable=SC2206 # we intentionally split on spaces here
+    # shellcheck disable=SC2206
     EXTRA_FLAGS=( ${UAENG_CMAKE_FLAGS} )
     CMAKE_ARGS+=( "${EXTRA_FLAGS[@]}" )
   fi

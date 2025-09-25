@@ -1,27 +1,34 @@
-# Normalize text to LF in repo; convert to CRLF on Windows checkout
+# ------------------------------------------------------------------------------
+# Umicom AuthorEngine AI - Git attributes
+# Normalize line endings and keep shell scripts with LF so they run on Unix/macOS.
+# Keep PowerShell scripts CRLF to play nicely with Windows host editors.
+# ------------------------------------------------------------------------------
+
+# Text by default, auto-normalize
 * text=auto
 
-# Keep PowerShell scripts with CRLF on checkout (common on Windows)
-*.ps1 text eol=crlf
-
-# Keep shell scripts as LF
-*.sh  text eol=lf
-
-# Images/binaries
-*.png binary
-*.jpg binary
-*.zip binary
-
-
-# Source & project files use LF in the repo
+# Source (prefer LF)
 *.c      text eol=lf
 *.h      text eol=lf
-CMakeLists.txt text eol=lf
-*.cmake  text eol=lf
 *.md     text eol=lf
+*.txt    text eol=lf
 *.yml    text eol=lf
 *.yaml   text eol=lf
-*.html   text eol=lf
-*.css    text eol=lf
-*.js     text eol=lf
-*.txt    text eol=lf
+*.json   text eol=lf
+
+# Windows scripts prefer CRLF
+*.ps1    text eol=crlf
+*.bat    text eol=crlf
+*.cmd    text eol=crlf
+
+# Unix shell scripts prefer LF
+*.sh     text eol=lf
+*.bash   text eol=lf
+
+# Make sure shell scripts are seen as executable on Unix/macOS clones
+scripts/*.sh            eol=lf
+scripts/run-uaengine.sh eol=lf
+
+# Keep GitHub Actions YAML with LF
+.github/*.yml  text eol=lf
+.github/*.yaml text eol=lf
