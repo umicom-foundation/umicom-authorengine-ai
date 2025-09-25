@@ -21,7 +21,7 @@ add_executable(uaengine
 )
 # Make sure public headers are visible
 include_directories(${CMAKE_SOURCE_DIR}/include)
-
+include(cmake/providers.cmake)
 # Compile the LLM implementation
 target_sources(uaengine PRIVATE src/llm_llama.c)
 
