@@ -1,7 +1,7 @@
 /*-----------------------------------------------------------------------------
  * Umicom AuthorEngine AI (uaengine)
  * File: include/ueng/llm.h
- * PURPOSE: Public C API for local-LLM embedding (llama.cpp backend).
+ * PURPOSE: Minimal cross-backend LLM API (OpenAI / Ollama / llama.cpp)
  *
  * Created by: Umicom Foundation (https://umicom.foundation/)
  * Author: Sammy Hegab
@@ -34,40 +34,38 @@ extern "C"
 {
 #endif
 
-  /* Forward-declared opaque context for an embedded LLM session. */
+  /*-----------------------------------------------------------------------------
+   * Backend identifiers
+   *
+   * These constants are used in switch/if statements across the backend
+   * implementations. On some systems the previous header set did not define
+   * them, which caused "undeclared identifier" build errors in llm_llama.c.
+   * Defining them here keeps all translation units in sync.
+   *---------------------------------------------------------------------------*/
+  typedef enum ueng_llm_backend_e
+  {
+    UENG_LLM_BACKEND_LLAMA = 1,  /* local: built-in llama.cpp */
+    UENG_LLM_BACKEND_OPENAI = 2, /* cloud: OpenAI REST API    */
+    UENG_LLM_BACKEND_OLLAMA = 3  /* local: Ollama HTTP API    */
+  } ueng_llm_backend_t;
+
+  /* Opaque handle for an in-process LLM session. Concrete definition lives in
+   * the backend .c (llm_llama.c when llama.cpp is enabled). */
   typedef struct ueng_llm_ctx ueng_llm_ctx;
 
-  /* ueng_llm_open: Create an in-process LLM context.
-   *
-   *  model_path  : filesystem path to a GGUF model (only used when the
-   *                real llama.cpp backend is compiled in).
-   *  ctx_tokens  : desired context length (e.g., 4096).
-   *  err         : output buffer for a human-friendly error on failure.
-   *  errsz       : size of 'err' in bytes.
-   *
-   *  RETURNS: non-NULL context on success, NULL on error (with 'err' filled).
-   *
-   * This function ALWAYS exists. When the embedded backend is not available,
-   * it returns NULL with an explanatory error; this keeps the main binary
-   * linkable and friendly for environments that do not bundle llama.cpp.
+  /* Create a new LLM context.
+   * - model_path: for local backends (llama.cpp); for remote backends you can
+   *               pass a model name (e.g., "gpt-4o-mini" or "llama3:8b").
+   * - ctx_tokens: desired context size; backends may clamp it.
+   * - err/errsz : optional human-readable error buffer.
+   * Returns non-NULL on success, NULL on failure (with 'err' filled when given).
    */
   ueng_llm_ctx *ueng_llm_open(const char *model_path, int ctx_tokens, char *err, size_t errsz);
 
-  /* ueng_llm_prompt: Run a simple prompt and collect a short completion.
-   *
-   *  ctx   : context obtained from ueng_llm_open.
-   *  prompt: UTF-8 input text.
-   *  out   : output buffer for the generated text.
-   *  outsz : size of 'out' in bytes (including NUL terminator).
-   *
-   *  RETURNS: 0 on success; non-zero on failure.
-   *
-   * This is intentionally tiny; we can extend it later to stream tokens or
-   * expose advanced sampling. For now it lets us verify end-to-end wiring.
-   */
+  /* Generate a short completion for 'prompt' into 'out' (NUL-terminated). */
   int ueng_llm_prompt(ueng_llm_ctx *ctx, const char *prompt, char *out, size_t outsz);
 
-  /* ueng_llm_close: Destroy and free the context (safe to call with NULL). */
+  /* Destroy a context (safe to call with NULL). */
   void ueng_llm_close(ueng_llm_ctx *ctx);
 
 #ifdef __cplusplus
