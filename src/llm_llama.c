@@ -79,7 +79,7 @@ int ueng_llm_prompt(ueng_llm_ctx* handle, const char* prompt, char* out, size_t 
     /* Very small prompt-&-complete loop using llama.cpp helpers */
     struct llama_batch batch = llama_batch_init(512, 0, 1);
 
-    int n_tokens = llama_tokenize(R->ctx, prompt, strlen(prompt), batch.tokens, 512, true, true);
+    int n_tokens = llama_tokenize(R->ctx, prompt, (int)strlen(prompt), batch.tokens, 512, true, true);
     if (n_tokens <= 0) { llama_batch_free(batch); return -2; }
 
     batch.n_tokens = n_tokens;
@@ -117,7 +117,7 @@ void ueng_llm_close(ueng_llm_ctx* handle) {
     llama_backend_free();
 }
 
-#else /* STUB (backend not compiled) --------------------------------------- */
+#else /* ------------------------------- STUB -------------------------------- */
 
 ueng_llm_ctx* ueng_llm_open(const char* model_path, int ctx_tokens,
                             char* err, size_t errsz) {
@@ -130,13 +130,18 @@ ueng_llm_ctx* ueng_llm_open(const char* model_path, int ctx_tokens,
     return NULL;
 }
 
-int ueng_llm_prompt(ueng_llm_ctx* ctx, const char* prompt,
-                    char* out, size_t outsz) {
+int ueng_llm_prompt(ueng_llm_ctx* ctx, const char* prompt, char* out, size_t outsz) {
     (void)ctx; (void)prompt;
-    if (out && outsz) { out[0] = '\0'; }
+    if (out && outsz) {
+        const char* msg = "[stub] LLM backend not linked";
+        strncpy(out, msg, outsz - 1);
+        out[outsz - 1] = '\0';
+    }
     return -1;
 }
 
-void ueng_llm_close(ueng_llm_ctx* ctx) { (void)ctx; }
+void ueng_llm_close(ueng_llm_ctx* ctx) {
+    (void)ctx;
+}
 
-#endif /* UENG_WITH_LLAMA_EMBED && HAVE_LLAMA_H */
+#endif /* embed vs stub */
