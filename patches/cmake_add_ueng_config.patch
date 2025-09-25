@@ -1,0 +1,18 @@
+*** a/CMakeLists.txt
+--- b/CMakeLists.txt
+@@
+-# (context) your existing add_executable line likely lists individual sources
+-# add_executable(uaengine src/main.c src/common.c src/fs.c src/serve.c ...)
++# NOTE: Add the tiny config module (no external deps)
++# If you already use a glob like src/*.c this may be unnecessary.
++# Otherwise make sure ueng_config.c is included in the target sources.
++#
++# Example:
++# add_executable(uaengine
++#   src/main.c
++#   src/common.c
++#   src/fs.c
++#   src/serve.c
++#   src/llm_llama.c
++#   src/ueng_config.c   # <--- add this line
++# )

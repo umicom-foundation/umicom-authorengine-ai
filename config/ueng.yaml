@@ -1,0 +1,39 @@
+#-----------------------------------------------------------------------------
+# Umicom AuthorEngine AI (uaengine)
+# File: config/ueng.yaml
+# PURPOSE: Example configuration for local/cloud LLMs and dev server.
+#
+# Created by: Umicom Foundation (https://umicom.foundation/)
+# Author: Sammy Hegab
+# Date: 25-09-2025
+# License: MIT
+#-----------------------------------------------------------------------------
+# This is a *flat* set of 'key: value' pairs that our tiny parser supports.
+# Unknown keys are ignored (forward-compatible).
+#
+# Precedence:
+#   defaults < this file < environment variables
+# You can override any field via env (see docs/LLM-INTEGRATION.md).
+#-----------------------------------------------------------------------------
+
+# LLM selection
+llm.provider: ollama        # one of: openai | ollama | llama
+llm.model:    qwen2.5:3b    # e.g., gpt-4o-mini | qwen2.5:3b | /path/to/model.gguf
+
+# OpenAI (cloud) — Prefer setting OPENAI_API_KEY in your environment
+openai.api_key:    ""       # leave empty here; read from env OPENAI_API_KEY
+openai.base_url:   ""       # optional; leave empty for default
+
+# Ollama (local server)
+ollama.host: "http://127.0.0.1:11434"
+
+# llama.cpp (in-process)
+llama.model_path: ""        # path to model.gguf (only if you embed llama.cpp)
+
+# Dev server
+serve.host: 127.0.0.1
+serve.port: 8080
+
+# Project paths
+paths.workspace_dir: workspace
+paths.site_root:     site

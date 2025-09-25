@@ -1,0 +1,16 @@
+/*-----------------------------------------------------------------------------
+ * OPTIONAL MAIN INTEGRATION (Additive only)
+ * Paste this block near early argument parsing/starter code in main.c.
+ * It reads config/ueng.yaml, then exports env vars only if they are
+ * not already present (so CLI and CI env continue to win).
+ *---------------------------------------------------------------------------*/
+#include "ueng/config.h"  /* new tiny module */
+
+{
+  UengConfig cfg;
+  /* Non-fatal: missing file is okay; we still apply defaults + env. */
+  ueng_config_init_from("config/ueng.yaml", &cfg);
+
+  /* Export env only if not already defined (overwrite=0). */
+  ueng_config_export_env(&cfg, 0);
+}
