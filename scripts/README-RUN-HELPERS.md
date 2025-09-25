@@ -67,3 +67,9 @@ git update-index --chmod=+x scripts/run-uaengine.sh   # so collaborators get the
 git commit -m "tools(run): add cross-platform uaengine runner scripts with docs"
 git push origin main
 ```
+> To use OpenAI with llm-selftest:
+> cmake -S . -B build -DUAENG_ENABLE_OPENAI=ON
+> cmake --build build -j
+> set OPENAI_API_KEY=sk-...   (Windows)   |   export OPENAI_API_KEY=...
+> set UENG_LLM_PROVIDER=openai
+> scripts\run-uaengine.ps1 -- llm-selftest gpt-4o-mini

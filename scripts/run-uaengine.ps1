@@ -1,85 +1,124 @@
-#------------------------------------------------------------------------------
-# Umicom AuthorEngine AI (uaengine)
-# File: scripts/run-uaengine.ps1
-# PURPOSE: Cross-platform-friendly PowerShell launcher to find and run the
-#          built 'uaengine' binary from common build directories.
-#
-# Created by: Umicom Foundation (https://umicom.foundation/)
-# Author: Sammy Hegab
-# Date: 25-09-2025
-# License: MIT
-#------------------------------------------------------------------------------
-<#
-.SYNOPSIS
-  Launches the compiled 'uaengine' binary regardless of whether you built with
-  Visual Studio (MSBuild) or Ninja.
+<#-----------------------------------------------------------------------------
+ * Umicom AuthorEngine AI (uaengine)
+ * File: scripts/run-uaengine.ps1
+ * PURPOSE: Cross-platform runner helper for locating and executing the built
+ *          'uaengine' binary on Windows. It discovers common MSBuild and
+ *          Ninja output folders and forwards all arguments to the binary.
+ *
+ * Created by: Umicom Foundation (https://umicom.foundation/)
+ * Author: Sammy Hegab
+ * Date: 24-09-2025
+ * License: MIT
+ *---------------------------------------------------------------------------#>
 
-.DESCRIPTION
-  This script looks for the 'uaengine(.exe)' binary in several common output
-  folders relative to the repository root (the folder that contains this
-  'scripts' directory). The first match is executed and all arguments you pass
-  to this script are forwarded to the executable unchanged.
+#------------------------------- HOW IT WORKS --------------------------------#
+# - We first discover the path to THIS script, even if invoked in unusual
+#   ways (e.g., -File, dot-sourced, or via another working directory).
+# - From the script path, we compute the repo root (parent dir), or fall back
+#   to 'git rev-parse --show-toplevel'.
+# - We then probe several candidate paths where 'uaengine(.exe)' usually is:
+#     build/uaengine.exe
+#     build/Debug/uaengine.exe
+#     build/Release/uaengine.exe
+#     build-ninja/uaengine.exe
+#     (plus the same paths relative to the current directory as a fallback)
+# - The first one that exists is executed with all user-passed args.
+# - Set UENG_RUN_VERBOSE=1 to see the probing list.
+#----------------------------------------------------------------------------#
 
-  Why this exists:
-    - New contributors shouldn't need to remember whether they built with
-      Ninja or MSBuild, or which configuration was last used.
-    - CI and documentation can reference a single stable entry point.
-    - The script prints friendly hints if the binary is missing.
+# Make errors fail the script immediately
+$ErrorActionPreference = 'Stop'
 
-.PARAMETER (passthrough via $args)
-  Any arguments after the script name are forwarded to 'uaengine'. For example:
-    powershell -ExecutionPolicy Bypass -File scripts\run-uaengine.ps1 -- --version
-    powershell -ExecutionPolicy Bypass -File scripts\run-uaengine.ps1 -- llm-selftest gpt-4o-mini
-
-.ENVIRONMENT
-  UENG_RUN_VERBOSE=1   -> prints extra diagnostics about resolution.
-
-.NOTES
-  The script is intentionally dependency-free and uses only built-in PowerShell.
-#>
-
-# Determine repo root: this script lives at <repo>/scripts/run-uaengine.ps1
-$ScriptDir = Split-Path -LiteralPath $PSCommandPath -Parent
-$RepoRoot  = Split-Path -LiteralPath $ScriptDir -Parent
-
-# Helper to write verbose messages only when requested
-function Write-RunVerbose([string]$msg) { if ($env:UENG_RUN_VERBOSE) { Write-Host "[run] $msg" } }
-
-# Candidates to probe (first existing wins). We probe both .exe and bare name, just in case.
-$candidates = @(
-  "build/uaengine.exe",
-  "build/uaengine",
-  "build/Release/uaengine.exe",
-  "build/Debug/uaengine.exe",
-  "build-ninja/uaengine.exe",
-  "build-ninja/uaengine"
-) | ForEach-Object { Join-Path $RepoRoot $_ }
-
-$Resolved = $null
-foreach ($c in $candidates) {
-  Write-RunVerbose "checking $c"
-  if (Test-Path -LiteralPath $c) { $Resolved = $c; break }
+# 1) Discover the full path to this script robustly
+#    - $MyInvocation.MyCommand.Path works across PowerShell versions,
+#      even when $PSCommandPath is not set.
+$ScriptPath = $null
+try { $ScriptPath = $MyInvocation.MyCommand.Path } catch {}
+if (-not $ScriptPath) {
+  try { $ScriptPath = $PSCommandPath } catch {}
 }
 
-if (-not $Resolved) {
+# If we *still* don't have a script path, try to infer it from git or CWD.
+if (-not $ScriptPath) {
+  # Best effort: assume the script lives at scripts/run-uaengine.ps1 under repo root
+  $gitRoot = $(git rev-parse --show-toplevel 2>$null)
+  if ($gitRoot) {
+    $ScriptPath = Join-Path $gitRoot 'scripts\run-uaengine.ps1'
+  } else {
+    # Last-ditch: current directory
+    $ScriptPath = Join-Path (Get-Location) 'scripts\run-uaengine.ps1'
+  }
+}
+
+# 2) Compute script dir and repo root (parent of scripts/)
+$ScriptDir = Split-Path -Path $ScriptPath -Parent
+$RepoRoot  = Split-Path -Path $ScriptDir  -Parent
+
+# If we couldn't derive a repo root (very unusual), try git again
+if (-not $RepoRoot -or -not (Test-Path $RepoRoot)) {
+  $gitRoot = $(git rev-parse --show-toplevel 2>$null)
+  if ($gitRoot) { $RepoRoot = $gitRoot }
+}
+
+# Helper: add a candidate path if it’s not null/empty
+function Add-Candidate([System.Collections.Generic.List[string]]$list, [string]$p) {
+  if ([string]::IsNullOrWhiteSpace($p)) { return }
+  $list.Add($p) | Out-Null
+}
+
+# 3) Build candidate list
+$c = [System.Collections.Generic.List[string]]::new()
+
+# Preferred (relative to repo root)
+Add-Candidate $c (Join-Path $RepoRoot 'build\uaengine.exe')
+Add-Candidate $c (Join-Path $RepoRoot 'build\Debug\uaengine.exe')
+Add-Candidate $c (Join-Path $RepoRoot 'build\Release\uaengine.exe')
+Add-Candidate $c (Join-Path $RepoRoot 'build-ninja\uaengine.exe')
+
+# Fallbacks (relative to current working directory)
+Add-Candidate $c 'build\uaengine.exe'
+Add-Candidate $c 'build\Debug\uaengine.exe'
+Add-Candidate $c 'build\Release\uaengine.exe'
+Add-Candidate $c 'build-ninja\uaengine.exe'
+
+if ($env:UENG_RUN_VERBOSE) {
+  Write-Host "[run] Probing for 'uaengine' in:"
+  $c | ForEach-Object { Write-Host "  - $_" }
+}
+
+# 4) Pick the first that exists
+$Exe = $null
+foreach ($p in $c) {
+  if (Test-Path -LiteralPath $p) { $Exe = (Resolve-Path -LiteralPath $p).Path; break }
+}
+
+if (-not $Exe) {
   Write-Host "[run] ERROR: could not find 'uaengine' in expected build folders." -ForegroundColor Red
-  Write-Host "Tried:"
-  $candidates | ForEach-Object { Write-Host "  - $_" }
-  Write-Host ""
-  Write-Host "Hints:"
+  Write-Host "Tried:" -ForegroundColor Yellow
+  $c | ForEach-Object { Write-Host "  $_" }
+  Write-Host "`nHints:" -ForegroundColor Yellow
   Write-Host "  1) Build with MSBuild (Visual Studio generator):"
   Write-Host "       cmake -S . -B build"
   Write-Host "       cmake --build build -j"
-  Write-Host "     The binary will be in 'build/Debug/uaengine.exe' (or Release)."
-  Write-Host ""
-  Write-Host "  2) Build with Ninja:"
+  Write-Host "     The binary will be in 'build\Debug\uaengine.exe' (or Release)."
+  Write-Host "`n  2) Build with Ninja:"
   Write-Host "       cmake -S . -B build-ninja -G Ninja -DCMAKE_BUILD_TYPE=Release"
   Write-Host "       cmake --build build-ninja -j"
-  Write-Host "     The binary will be in 'build-ninja/uaengine.exe'."
+  Write-Host "     The binary will be in 'build-ninja\uaengine.exe'."
   exit 1
 }
 
-Write-RunVerbose "resolved to $Resolved"
-# Forward all arguments verbatim to the binary
-& $Resolved @args
-$LASTEXITCODE
+if ($env:UENG_RUN_VERBOSE) { Write-Host "[run] Using: $Exe" -ForegroundColor Green }
+
+# 5) Forward all arguments after '--' (or all args if none)
+#    We accept both:
+#      run-uaengine.ps1 -- --version
+#      run-uaengine.ps1 --version
+$argsToPass = $args
+if ($args.Length -ge 1 -and $args[0] -eq '--') {
+  $argsToPass = $args[1..($args.Length-1)]
+}
+
+# Exec
+& $Exe @argsToPass
+exit $LASTEXITCODE
