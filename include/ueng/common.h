@@ -7,6 +7,28 @@
  * Author: Sammy Hegab + contributors
  * License: MIT
  *---------------------------------------------------------------------------*/
+/*---------------------------------------------------------------------------
+ * Module notes (added, non-destructive):
+ * MODULE OVERVIEW
+ * ----------------
+ * Purpose: Cross-platform helpers shared across the engine.
+ * Contents:
+ *   - Tiny dynamic string list (StrList) used to accumulate filenames.
+ *   - Portable filesystem probes (file_exists/dir_exists) and mkdir helpers.
+ *   - Time helpers used for stamping build artifacts.
+ *   - Small process runner utilities for invoking external tools (Pandoc, etc).
+
+ * Design notes:
+ *   - Keep headers minimal and C89/C17 friendly.
+ *   - Callers should prefer the wrappers here instead of sprinkling #ifdefs.
+ *   - Functions are intentionally small to ease portability and testing.
+
+ * Usage example:
+ *   // Get a UTC build date string
+ *   char date[16]; build_date_utc(date, sizeof(date));
+ *   printf("Built on %s\n", date);
+ *---------------------------------------------------------------------------*/
+
 #ifndef UENG_COMMON_H
 #define UENG_COMMON_H
 
