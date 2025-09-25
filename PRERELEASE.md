@@ -4,7 +4,9 @@ _Date: 2025-09-23_
 > **Status**: Pre-release (candidate). Built by CI on Windows, Linux, and macOS. Use for testing; not recommended for production distribution yet.
 
 ## Summary
+
 This pre-release focuses on developer experience and packaging:
+
 - PowerShell tooling under `tools/` (`build.ps1`, `pack.ps1`, `install.ps1`, `uninstall.ps1`, `make.ps1`).
 - Visual Studio builds in a separate `build-vs` folder.
 - CI uploads **raw binaries and zipped artefacts** per OS.
@@ -12,13 +14,16 @@ This pre-release focuses on developer experience and packaging:
 - Optional style guard via `.clang-format` (LLVM base).
 
 ## Highlights
+
 - **One-liner build & install** on Windows:
+
   ```powershell
   powershell -ExecutionPolicy Bypass -File .\tools\build.ps1
   # or with VS generator:
   powershell -ExecutionPolicy Bypass -File .\tools\build.ps1 -Generator "Visual Studio 17 2022" -BuildDir .\build-vs
   ```
 - **Package & zip** in one go:
+
   ```powershell
   powershell -ExecutionPolicy Bypass -File .\tools\pack.ps1 -Zip -InstallToUserBin
   ```
@@ -36,6 +41,7 @@ This pre-release focuses on developer experience and packaging:
 - README updated with tools usage and VS build directory (`build-vs`).
 
 ### Fixed
+
 - Windows: robust path/quoting in scripts; packer detects VS multi-config output (`build-vs\Release\uaengine.exe`).
 
 ## Known Issues / To Do
@@ -44,12 +50,14 @@ This pre-release focuses on developer experience and packaging:
 - Theme/custom CSS pipeline minimal; more layouts planned.
 
 ## Upgrade Notes
+
 No breaking changes to CLI. If you installed a previous binary to `%USERPROFILE%\bin`, you can overwrite it via:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\pack.ps1 -InstallToUserBin
 ```
 
 ## Verification
+
 1. Run the binary:
    ```powershell
    uaengine --version
@@ -65,6 +73,7 @@ powershell -ExecutionPolicy Bypass -File .\tools\pack.ps1 -InstallToUserBin
    ```
 
 ## Checksums
+
 Compute checksums locally (example on Windows PowerShell):
 ```powershell
 Get-FileHash .\dist\uaengine-windows.zip -Algorithm SHA256
