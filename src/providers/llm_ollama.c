@@ -14,23 +14,24 @@
 
 struct ueng_llm_ctx
 {
-  int   backend;
-  char* model;
+  int backend;
+  char *model;
 };
 
-ueng_llm_ctx* ueng_llm_open_ollama(const char* model,
-                                   int         ctx_tokens,
-                                   char*       err,
-                                   size_t      errsz)
+ueng_llm_ctx *ueng_llm_open_ollama(const char *model, int ctx_tokens, char *err, size_t errsz)
 {
   (void)ctx_tokens;
-  if (!model || !*model) {
-    if (err) snprintf(err, errsz, "Ollama: model name is empty");
+  if (!model || !*model)
+  {
+    if (err)
+      snprintf(err, errsz, "Ollama: model name is empty");
     return NULL;
   }
-  ueng_llm_ctx* c = (ueng_llm_ctx*)calloc(1, sizeof(*c));
-  if (!c) {
-    if (err) snprintf(err, errsz, "Ollama: out of memory");
+  ueng_llm_ctx *c = (ueng_llm_ctx *)calloc(1, sizeof(*c));
+  if (!c)
+  {
+    if (err)
+      snprintf(err, errsz, "Ollama: out of memory");
     return NULL;
   }
   c->backend = UENG_LLM_BACKEND_OLLAMA;
@@ -42,25 +43,25 @@ ueng_llm_ctx* ueng_llm_open_ollama(const char* model,
   return c;
 }
 
-int ueng_llm_prompt_ollama(ueng_llm_ctx*  ctx,
-                           const char*    prompt,
-                           char*          out,
-                           size_t         outsz)
+int ueng_llm_prompt_ollama(ueng_llm_ctx *ctx, const char *prompt, char *out, size_t outsz)
 {
-  if (!ctx || !prompt) {
+  if (!ctx || !prompt)
+  {
     return -1;
   }
-  if (out && outsz) {
-    snprintf(out, outsz,
-             "[Ollama stub] Would POST to local Ollama for model '%s'.",
+  if (out && outsz)
+  {
+    snprintf(out, outsz, "[Ollama stub] Would POST to local Ollama for model '%s'.",
              ctx->model ? ctx->model : "llama3");
   }
   return 0;
 }
 
-void ueng_llm_close_ollama(ueng_llm_ctx* ctx)
+void ueng_llm_close_ollama(ueng_llm_ctx *ctx)
 {
-  if (!ctx) return;
-  if (ctx->model) free(ctx->model);
+  if (!ctx)
+    return;
+  if (ctx->model)
+    free(ctx->model);
   free(ctx);
 }
