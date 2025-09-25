@@ -22,7 +22,8 @@
    situation at runtime (helpful for contributors without the backend).
 ---------------------------------------------------------------------------- */
 
-struct ueng_llm_ctx {
+struct ueng_llm_ctx
+{
   int placeholder; /* unused in stub; real backend holds llama_* handles */
 };
 
@@ -35,15 +36,17 @@ struct ueng_llm_ctx {
 --------------------------------------------------------------------------- */
 #include <llama.h>
 
-struct ueng_llm_ctx_real {
+struct ueng_llm_ctx_real
+{
   struct llama_model *model;
   struct llama_context *ctx;
   int n_ctx;
 };
 
-ueng_llm_ctx *ueng_llm_open(const char *model_path, int ctx_tokens,
-                            char *err, size_t errsz) {
-  if (!model_path || !*model_path) {
+ueng_llm_ctx *ueng_llm_open(const char *model_path, int ctx_tokens, char *err, size_t errsz)
+{
+  if (!model_path || !*model_path)
+  {
     if (err && errsz)
       snprintf(err, errsz, "model path is empty");
     return NULL;
@@ -60,29 +63,30 @@ ueng_llm_ctx *ueng_llm_open(const char *model_path, int ctx_tokens,
   cp.seed = 0;
 
   struct llama_model *model = llama_load_model_from_file(model_path, mp);
-  if (!model) {
+  if (!model)
+  {
     if (err && errsz)
       snprintf(err, errsz, "failed to load model: %s", model_path);
     return NULL;
   }
   struct llama_context *lctx = llama_new_context_with_model(model, cp);
-  if (!lctx) {
+  if (!lctx)
+  {
     if (err && errsz)
       snprintf(err, errsz, "failed to create llama context");
     llama_free_model(model);
     return NULL;
   }
 
-  struct ueng_llm_ctx_real *R =
-      (struct ueng_llm_ctx_real *)calloc(1, sizeof(*R));
+  struct ueng_llm_ctx_real *R = (struct ueng_llm_ctx_real *)calloc(1, sizeof(*R));
   R->model = model;
   R->ctx = lctx;
   R->n_ctx = ctx_tokens;
   return (ueng_llm_ctx *)R;
 }
 
-int ueng_llm_prompt(ueng_llm_ctx *handle, const char *prompt, char *out,
-                    size_t outsz) {
+int ueng_llm_prompt(ueng_llm_ctx *handle, const char *prompt, char *out, size_t outsz)
+{
   if (!handle || !prompt || !out || outsz == 0)
     return -1;
   struct ueng_llm_ctx_real *R = (struct ueng_llm_ctx_real *)handle;
@@ -90,28 +94,31 @@ int ueng_llm_prompt(ueng_llm_ctx *handle, const char *prompt, char *out,
   /* Very small prompt-&-complete loop using llama.cpp helpers */
   struct llama_batch batch = llama_batch_init(512, 0, 1);
 
-  int n_tokens = llama_tokenize(R->ctx, prompt, (int)strlen(prompt),
-                                batch.tokens, 512, true, true);
-  if (n_tokens <= 0) {
+  int n_tokens = llama_tokenize(R->ctx, prompt, (int)strlen(prompt), batch.tokens, 512, true, true);
+  if (n_tokens <= 0)
+  {
     llama_batch_free(batch);
     return -2;
   }
 
   batch.n_tokens = n_tokens;
-  if (llama_decode(R->ctx, batch) != 0) {
+  if (llama_decode(R->ctx, batch) != 0)
+  {
     llama_batch_free(batch);
     return -3;
   }
 
   /* Greedy sample a few tokens for demonstration */
   size_t used = 0;
-  for (int t = 0; t < 64 && used + 8 < outsz; ++t) {
+  for (int t = 0; t < 64 && used + 8 < outsz; ++t)
+  {
     llama_token tok = llama_sample_token_greedy(R->ctx, NULL);
     if (tok == llama_token_eos(R->ctx))
       break;
     const char *piece = llama_token_to_piece(R->ctx, tok);
     size_t L = piece ? strlen(piece) : 0;
-    if (L > 0) {
+    if (L > 0)
+    {
       if (used + L >= outsz)
         L = outsz - used - 1;
       memcpy(out + used, piece, L);
@@ -129,7 +136,8 @@ int ueng_llm_prompt(ueng_llm_ctx *handle, const char *prompt, char *out,
   return 0;
 }
 
-void ueng_llm_close(ueng_llm_ctx *handle) {
+void ueng_llm_close(ueng_llm_ctx *handle)
+{
   if (!handle)
     return;
   struct ueng_llm_ctx_real *R = (struct ueng_llm_ctx_real *)handle;
@@ -141,11 +149,12 @@ void ueng_llm_close(ueng_llm_ctx *handle) {
 
 #else /* ------------------------------- STUB -------------------------------- */
 
-ueng_llm_ctx *ueng_llm_open(const char *model_path, int ctx_tokens,
-                            char *err, size_t errsz) {
+ueng_llm_ctx *ueng_llm_open(const char *model_path, int ctx_tokens, char *err, size_t errsz)
+{
   (void)model_path;
   (void)ctx_tokens;
-  if (err && errsz) {
+  if (err && errsz)
+  {
     snprintf(err, errsz,
              "llama.cpp backend not built. Reconfigure with "
              "-DUENG_WITH_LLAMA_EMBED=ON and vendor third_party/llama.cpp "
@@ -154,11 +163,12 @@ ueng_llm_ctx *ueng_llm_open(const char *model_path, int ctx_tokens,
   return NULL;
 }
 
-int ueng_llm_prompt(ueng_llm_ctx *ctx, const char *prompt, char *out,
-                    size_t outsz) {
+int ueng_llm_prompt(ueng_llm_ctx *ctx, const char *prompt, char *out, size_t outsz)
+{
   (void)ctx;
   (void)prompt;
-  if (out && outsz) {
+  if (out && outsz)
+  {
     const char *msg = "[stub] LLM backend not linked";
     strncpy(out, msg, outsz - 1);
     out[outsz - 1] = '\0';
