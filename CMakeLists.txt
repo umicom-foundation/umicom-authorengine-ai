@@ -19,6 +19,11 @@ add_executable(uaengine
   src/fs.c
   src/serve.c 
 )
+# Make sure public headers are visible
+include_directories(${CMAKE_SOURCE_DIR}/include)
+
+# Compile the LLM implementation
+target_sources(uaengine PRIVATE src/llm_llama.c)
 
 # ---- Includes ----
 # Public: headers under include/ueng so consumers can do #include "ueng/…"
