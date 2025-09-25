@@ -7,10 +7,10 @@ on:
 permissions:
   contents: read
 
-# ------------------------------------------------------------
-# Job 1: Basic smoke — build once per OS and run `--version`.
-# ------------------------------------------------------------
 jobs:
+  # ------------------------------------------------------------
+  # Build (+run --version) on all 3 OSes using your runner scripts
+  # ------------------------------------------------------------
   smoke-run:
     name: smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -23,7 +23,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ----- Linux/macOS: ensure Ninja is available (fast predictable builds)
+      # Linux/macOS use Ninja for quick, consistent builds
       - name: Install Ninja (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -36,7 +36,7 @@ jobs:
           brew update
           brew install ninja || true
 
-      # ----- Build
+      # Windows builds via MSBuild (Visual Studio generator)
       - name: Configure + Build (Windows / MSBuild)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -44,6 +44,7 @@ jobs:
           cmake -S . -B build
           cmake --build build -j
 
+      # Unix builds via Ninja
       - name: Configure + Build (Unix / Ninja)
         if: runner.os != 'Windows'
         shell: bash
@@ -51,7 +52,7 @@ jobs:
           cmake -S . -B build-ninja -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build-ninja -j
 
-      # ----- Run using the new helper scripts
+      # Exercise the runner scripts (—version)
       - name: Run (Windows) — --version
         if: runner.os == 'Windows'
         shell: pwsh
@@ -67,15 +68,116 @@ jobs:
           scripts/run-uaengine.sh -- --version
 
   # ------------------------------------------------------------------
-  # Job 2: Optional OpenAI smoke — only runs if OPENAI_API_KEY secret
-  #        exists. Builds with OpenAI enabled and runs llm-selftest.
+  # Optional: OpenAI smoke. Only runs if OPENAI_API_KEY is present.
   # ------------------------------------------------------------------
   smoke-run-openai:
-    env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     if: ${{ secrets.OPENAI_API_KEY != '' }}
     name: smoke-openai (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      # keep it light; expand to macOS if you want
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      UENG_LLM_PROVIDER: openai
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Ninja (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+
+      # Build with OpenAI enabled
+      - name: Configure + Build (Windows / MSBuild)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake -S . -B build -DUAENG_ENABLE_OPENAI=ON
+          cmake --build build -j
+
+      - name: Configure + Build (Linux / Ninja)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cmake -S . -B build-ninja -G Ninja -DCMAKE_BUILD_TYPE=Release -DUAENG_ENABLE_OPENAI=ON
+          cmake --build build-ninja -j
+
+      # Smoke: llm-selftest via the runner
+      - name: Run (Windows) — llm-selftest
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts\run-uaengine.ps1 -- llm-selftest gpt-4o-mini
+
+      - name: Run (Linux) — llm-selftest
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          scripts/run-uaengine.sh llm-selftest gpt-4o-mini
+
+  # ------------------------------------------------------------------
+  # Optional: Ollama smoke (Docker). Enable using repo variable:
+  # Settings → Actions → Variables → New variable:
+  #   Name: UENG_ENABLE_OLLAMA_SMOKE   Value: true
+  #
+  # Pulls a tiny model to keep CI quick (tinyllama).
+  # ------------------------------------------------------------------
+  smoke-run-ollama:
+    if: ${{ vars.UENG_ENABLE_OLLAMA_SMOKE == 'true' }}
+    name: smoke-ollama (ubuntu)
+    runs-on: ubuntu-latest
+    env:
+      UENG_LLM_PROVIDER: ollama
+      UENG_OLLAMA_HOST: http://localhost:11434
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build jq curl
+
+      - name: Start Ollama (Docker)
+        run: |
+          docker run -d --name ollama -p 11434:11434 ollama/ollama:latest
+          # Wait for API to come up
+          for i in {1..60}; do
+            if curl -fsS http://localhost:11434/api/tags >/dev/null; then
+              echo "Ollama is up"; break
+            fi
+            echo "Waiting for Ollama... ($i)"; sleep 2
+          done
+
+      - name: Pull tiny model
+        run: |
+          docker exec ollama ollama pull tinyllama
+
+      # Build with OLLAMA provider enabled
+      - name: Configure + Build (Ninja)
+        run: |
+          cmake -S . -B build-ninja -G Ninja -DCMAKE_BUILD_TYPE=Release -DUAENG_ENABLE_OLLAMA=ON
+          cmake --build build-ninja -j
+
+      - name: Run — llm-selftest (Ollama)
+        shell: bash
+        run: |
+          export UENG_RUN_VERBOSE=1
+          scripts/run-uaengine.sh llm-selftest tinyllama
+
+      - name: Docker logs (on failure)
+        if: failure()
+        run: |
+          docker logs ollama || true
+
+      - name: Cleanup Docker
+        if: always()
+        run: |
+          docker rm -f ollama || true
