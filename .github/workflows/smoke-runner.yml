@@ -1,0 +1,81 @@
+name: smoke / run-uaengine
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# ------------------------------------------------------------
+# Job 1: Basic smoke — build once per OS and run `--version`.
+# ------------------------------------------------------------
+jobs:
+  smoke-run:
+    name: smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ----- Linux/macOS: ensure Ninja is available (fast predictable builds)
+      - name: Install Ninja (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+
+      - name: Install Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install ninja || true
+
+      # ----- Build
+      - name: Configure + Build (Windows / MSBuild)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake -S . -B build
+          cmake --build build -j
+
+      - name: Configure + Build (Unix / Ninja)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cmake -S . -B build-ninja -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-ninja -j
+
+      # ----- Run using the new helper scripts
+      - name: Run (Windows) — --version
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:UENG_RUN_VERBOSE="1"
+          powershell -ExecutionPolicy Bypass -File scripts\run-uaengine.ps1 -- --version
+
+      - name: Run (Unix) — --version
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          export UENG_RUN_VERBOSE=1
+          scripts/run-uaengine.sh -- --version
+
+  # ------------------------------------------------------------------
+  # Job 2: Optional OpenAI smoke — only runs if OPENAI_API_KEY secret
+  #        exists. Builds with OpenAI enabled and runs llm-selftest.
+  # ------------------------------------------------------------------
+  smoke-run-openai:
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    if: ${{ secrets.OPENAI_API_KEY != '' }}
+    name: smoke-openai (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      # keep it light; expand to macOS if you want
