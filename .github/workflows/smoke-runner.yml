@@ -7,9 +7,13 @@ on:
 permissions:
   contents: read
 
+env:
+  # Keep cache dirs in the workspace so actions/cache can persist them reliably
+  UENG_CACHE_ROOT: ${{ github.workspace }}/.cache
+
 jobs:
   # ------------------------------------------------------------
-  # Build (+run --version) on all 3 OSes using your runner scripts
+  # Build & run --version on all OSes using your runner scripts
   # ------------------------------------------------------------
   smoke-run:
     name: smoke (${{ matrix.os }})
@@ -23,20 +27,58 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Linux/macOS use Ninja for quick, consistent builds
-      - name: Install Ninja (Linux)
+      # ---------- Linux/macOS: Ninja + ccache ----------
+      - name: Install Ninja & ccache (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build
+          sudo apt-get install -y ninja-build ccache
 
-      - name: Install Ninja (macOS)
+      - name: Install Ninja & ccache (macOS)
         if: runner.os == 'macOS'
         run: |
           brew update
-          brew install ninja || true
+          brew install ninja ccache || true
 
-      # Windows builds via MSBuild (Visual Studio generator)
+      - name: Prepare ccache directory (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p "${UENG_CACHE_ROOT}/ccache"
+
+      - name: Restore ccache (Unix)
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.UENG_CACHE_ROOT }}/ccache
+          key: ccache-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'src/**', 'include/**', 'snippets/**', 'cmake/**') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
+
+      - name: Configure + Build (Unix / Ninja + ccache)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          CCACHE_DIR: ${{ env.UENG_CACHE_ROOT }}/ccache
+        run: |
+          # Tell CMake to use ccache
+          cmake -S . -B build-ninja \
+            -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --build build-ninja -j
+          ccache -s || true
+
+      - name: Cache build folder (Unix; best-effort)
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: build-ninja
+          key: cmake-build-${{ runner.os }}-${{ github.ref }}-${{ hashFiles('CMakeLists.txt', 'src/**', 'include/**', 'snippets/**', 'cmake/**') }}
+          restore-keys: |
+            cmake-build-${{ runner.os }}-${{ github.ref }}-
+            cmake-build-${{ runner.os }}-
+
+      # ---------- Windows: MSBuild + cache build dir ----------
       - name: Configure + Build (Windows / MSBuild)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -44,15 +86,17 @@ jobs:
           cmake -S . -B build
           cmake --build build -j
 
-      # Unix builds via Ninja
-      - name: Configure + Build (Unix / Ninja)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          cmake -S . -B build-ninja -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build-ninja -j
+      - name: Cache build folder (Windows; best-effort)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: cmake-build-${{ runner.os }}-${{ github.ref }}-${{ hashFiles('CMakeLists.txt', 'src/**', 'include/**', 'snippets/**', 'cmake/**') }}
+          restore-keys: |
+            cmake-build-${{ runner.os }}-${{ github.ref }}-
+            cmake-build-${{ runner.os }}-
 
-      # Exercise the runner scripts (—version)
+      # ---------- Exercise runner scripts ----------
       - name: Run (Windows) — --version
         if: runner.os == 'Windows'
         shell: pwsh
@@ -82,40 +126,60 @@ jobs:
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       UENG_LLM_PROVIDER: openai
+      UENG_CACHE_ROOT: ${{ github.workspace }}/.cache
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Ninja (Linux)
+      # Linux: Ninja + ccache + OpenAI
+      - name: Install Ninja & ccache (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build
+          sudo apt-get install -y ninja-build ccache
 
-      # Build with OpenAI enabled
-      - name: Configure + Build (Windows / MSBuild)
+      - name: Prepare ccache directory (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p "${UENG_CACHE_ROOT}/ccache"
+
+      - name: Restore ccache (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.UENG_CACHE_ROOT }}/ccache
+          key: ccache-openai-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'src/**', 'include/**', 'snippets/**', 'cmake/**') }}
+          restore-keys: |
+            ccache-openai-${{ runner.os }}-
+
+      - name: Configure + Build (Linux / Ninja + OpenAI)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CCACHE_DIR: ${{ env.UENG_CACHE_ROOT }}/ccache
+        run: |
+          cmake -S . -B build-ninja -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DUAENG_ENABLE_OPENAI=ON \
+                -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+                -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --build build-ninja -j
+          ccache -s || true
+
+      - name: Configure + Build (Windows / MSBuild + OpenAI)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           cmake -S . -B build -DUAENG_ENABLE_OPENAI=ON
           cmake --build build -j
 
-      - name: Configure + Build (Linux / Ninja)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          cmake -S . -B build-ninja -G Ninja -DCMAKE_BUILD_TYPE=Release -DUAENG_ENABLE_OPENAI=ON
-          cmake --build build-ninja -j
-
-      # Smoke: llm-selftest via the runner
-      - name: Run (Windows) — llm-selftest
+      - name: Run (Windows) — llm-selftest (OpenAI)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           powershell -ExecutionPolicy Bypass -File scripts\run-uaengine.ps1 -- llm-selftest gpt-4o-mini
 
-      - name: Run (Linux) — llm-selftest
+      - name: Run (Linux) — llm-selftest (OpenAI)
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -126,7 +190,7 @@ jobs:
   # Settings → Actions → Variables → New variable:
   #   Name: UENG_ENABLE_OLLAMA_SMOKE   Value: true
   #
-  # Pulls a tiny model to keep CI quick (tinyllama).
+  # Caches the tiny model via actions/cache by bind-mounting a host dir.
   # ------------------------------------------------------------------
   smoke-run-ollama:
     if: ${{ vars.UENG_ENABLE_OLLAMA_SMOKE == 'true' }}
@@ -135,19 +199,34 @@ jobs:
     env:
       UENG_LLM_PROVIDER: ollama
       UENG_OLLAMA_HOST: http://localhost:11434
+      OLLAMA_CACHE_DIR: ${{ github.workspace }}/.cache/ollama-models
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Ninja
+      - name: Install Ninja & tools
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build jq curl
 
-      - name: Start Ollama (Docker)
+      - name: Prepare model cache dir
         run: |
-          docker run -d --name ollama -p 11434:11434 ollama/ollama:latest
+          mkdir -p "${OLLAMA_CACHE_DIR}"
+
+      - name: Restore Ollama model cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.OLLAMA_CACHE_DIR }}
+          key: ollama-models-tinyllama
+          restore-keys: |
+            ollama-models-
+
+      - name: Start Ollama (Docker with model bind-mount)
+        run: |
+          docker run -d --name ollama -p 11434:11434 \
+            -v "${OLLAMA_CACHE_DIR}:/root/.ollama" \
+            ollama/ollama:latest
           # Wait for API to come up
           for i in {1..60}; do
             if curl -fsS http://localhost:11434/api/tags >/dev/null; then
@@ -156,12 +235,11 @@ jobs:
             echo "Waiting for Ollama... ($i)"; sleep 2
           done
 
-      - name: Pull tiny model
+      - name: Pull tiny model (cached)
         run: |
           docker exec ollama ollama pull tinyllama
 
-      # Build with OLLAMA provider enabled
-      - name: Configure + Build (Ninja)
+      - name: Configure + Build (Ninja + OLLAMA)
         run: |
           cmake -S . -B build-ninja -G Ninja -DCMAKE_BUILD_TYPE=Release -DUAENG_ENABLE_OLLAMA=ON
           cmake --build build-ninja -j
@@ -176,6 +254,13 @@ jobs:
         if: failure()
         run: |
           docker logs ollama || true
+
+      - name: Save Ollama model cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.OLLAMA_CACHE_DIR }}
+          key: ollama-models-tinyllama
 
       - name: Cleanup Docker
         if: always()
