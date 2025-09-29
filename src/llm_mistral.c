@@ -4,7 +4,7 @@
  * PURPOSE: Minimal Mistral (Codestral) backend using Chat Completions API.
  *
  * Created by: Umicom Foundation (https://umicom.foundation/)
- * Author: Sammy Hegab + Sarah (assistant)
+ * Author: Sammy Hegab 
  * Date: 28-09-2025
  * License: MIT
  *---------------------------------------------------------------------------*
