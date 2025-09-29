@@ -1,0 +1,10 @@
+--- a/src/ueng_config.c
++++ b/src/ueng_config.c
+@@
++  /* Mistral / Codestral additions */
++  const char *mkey = getenv("MISTRAL_API_KEY");
++  if (mkey && *mkey) set_kv(out, "mistral.api_key", mkey);
++  const char *mbase = getenv("UENG_MISTRAL_BASE_URL");
++  if (mbase && *mbase) set_kv(out, "mistral.base_url", mbase);
++  const char *mmod = getenv("UENG_MISTRAL_MODEL");
++  if (mmod && *mmod) set_kv(out, "mistral.model", mmod);
