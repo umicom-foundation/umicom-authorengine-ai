@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1600">
+<rect width="100%" height="100%" fill="#f4f4f4"/>
+<text x="50" y="200" font-size="64" font-family="Segoe UI,Arial,sans-serif">My New Book</text>
+<text x="50" y="300" font-size="32" font-family="Segoe UI,Arial,sans-serif">by Anonymous</text>
+</svg>

@@ -125,3 +125,7 @@ message(STATUS "  llama.cpp backend   : ${UAENG_ENABLE_LLAMA}")
 set_target_properties(uaengine PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )
+
+# Umicom Foundation: wire libcurl + uengine target
+include(cmake/umicom-helpers.cmake)
+
